@@ -20,27 +20,14 @@ def make_icon():
     d = ImageDraw.Draw(img)
 
     badge = (44, 48, 54, 255)
-    blue = (65, 166, 235, 255)
-    shadow_blue = (25, 123, 203, 255)
     white = (255, 255, 255, 255)
-    cutout = badge
 
     d.rounded_rectangle([6, 6, 58, 58], radius=14, fill=badge)
 
-    d.arc([20, 8, 32, 23], 190, 345, fill=white, width=3)
-    d.arc([32, 8, 44, 23], 195, 350, fill=white, width=3)
-    d.line([32, 23, 32, 29], fill=white, width=3)
-
-    d.pieslice([12, 25, 52, 55], 0, 180, fill=blue)
-    d.rectangle([15, 39, 48, 43], fill=blue)
-    d.polygon([(48, 33), (58, 28), (54, 40)], fill=blue)
-    d.rectangle([18, 42, 47, 44], fill=shadow_blue)
-
-    d.pieslice([17, 30, 27, 49], 180, 360, fill=cutout)
-    d.pieslice([26, 30, 38, 50], 180, 360, fill=cutout)
-    d.pieslice([37, 30, 49, 49], 180, 360, fill=cutout)
-    d.ellipse([43, 32, 46, 35], fill=badge)
-    d.ellipse([24, 29, 36, 35], fill=white)
+    d.arc([17, 17, 32, 36], 190, 345, fill=white, width=4)
+    d.arc([32, 17, 47, 36], 195, 350, fill=white, width=4)
+    d.line([32, 34, 32, 47], fill=white, width=4)
+    d.ellipse([29, 44, 35, 50], fill=white)
     return img
 
 
