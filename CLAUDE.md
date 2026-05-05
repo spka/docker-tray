@@ -85,12 +85,17 @@ If the container exposes a host port matching either of these forms:
 127.0.0.1:<host-port>-><container-port>/tcp
 ```
 
-the submenu includes:
+running container submenus include:
 
-- `Open in browser :<host-port>`
 - `Restart`
+- `Stop`
 
-If no matching web port is found, only `Restart` is shown.
+If a running container has a matching web port, it also includes
+`Open in browser :<host-port>`.
+
+Stopped container submenus include:
+
+- `Start`
 
 ## Key Design Decisions
 

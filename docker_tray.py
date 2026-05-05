@@ -75,10 +75,10 @@ def extract_web_port(ports_str):
     return match.group(1) if match else None
 
 
-def restart_container(name):
+def run_docker_action(action, name):
     threading.Thread(
         target=subprocess.run,
-        args=(["docker", "restart", name],),
+        args=(["docker", action, name],),
         daemon=True,
     ).start()
 
@@ -105,8 +105,16 @@ def make_open_cb(port):
     return lambda icon, item: open_url(port)
 
 
+def make_start_cb(name):
+    return lambda icon, item: run_docker_action("start", name)
+
+
 def make_restart_cb(name):
-    return lambda icon, item: restart_container(name)
+    return lambda icon, item: run_docker_action("restart", name)
+
+
+def make_stop_cb(name):
+    return lambda icon, item: run_docker_action("stop", name)
 
 
 def start_menu_polling(icon):
@@ -134,15 +142,19 @@ def get_menu_items(pystray):
     try:
         for name, running, port in get_containers():
             sub = []
-            if port:
+            if running and port:
                 sub.append(pystray.MenuItem(
                     f"Open in browser :{port}",
                     make_open_cb(port)
                 ))
-            sub.append(pystray.MenuItem(
-                "Restart",
-                make_restart_cb(name)
-            ))
+            if running:
+                sub += [
+                    pystray.MenuItem("Restart", make_restart_cb(name)),
+                    pystray.MenuItem("Stop", make_stop_cb(name)),
+                ]
+            else:
+                sub.append(pystray.MenuItem("Start", make_start_cb(name)))
+
             status_marker = "• " if running else "◦ "
             label = (
                 f"{status_marker}{name}  :{port}"
