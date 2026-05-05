@@ -19,24 +19,18 @@ def make_icon():
     img = Image.new("RGBA", (64, 64), color=(0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    deep_blue = (12, 68, 120, 255)
-    mid_blue = (20, 124, 190, 255)
-    light_blue = (116, 204, 232, 255)
-    foam = (232, 250, 255, 255)
+    white = (255, 255, 255, 255)
 
-    d.ellipse([7, 33, 57, 58], fill=deep_blue)
-    d.pieslice([6, 21, 58, 59], 14, 166, fill=mid_blue)
-    d.arc([12, 30, 52, 62], 190, 350, fill=light_blue, width=3)
+    d.rectangle([13, 30, 43, 38], fill=white)
+    d.rectangle([17, 22, 24, 28], fill=white)
+    d.rectangle([26, 22, 33, 28], fill=white)
+    d.rectangle([35, 22, 42, 28], fill=white)
+    d.rectangle([26, 14, 33, 20], fill=white)
 
-    d.polygon([(32, 30), (20, 8), (29, 10), (36, 25)], fill=deep_blue)
-    d.polygon([(32, 30), (44, 8), (35, 10), (28, 25)], fill=deep_blue)
-    d.polygon([(28, 18), (15, 12), (21, 7), (34, 23)], fill=mid_blue)
-    d.polygon([(36, 18), (49, 12), (43, 7), (30, 23)], fill=mid_blue)
-    d.line([(32, 27), (32, 38)], fill=foam, width=3)
-
-    d.ellipse([20, 35, 44, 47], fill=foam)
-    d.ellipse([22, 32, 42, 43], fill=mid_blue)
-    d.arc([17, 38, 47, 54], 200, 340, fill=foam, width=2)
+    d.polygon([(45, 29), (55, 25), (52, 34)], fill=white)
+    d.pieslice([9, 24, 56, 52], 0, 180, fill=white)
+    d.rectangle([9, 38, 50, 41], fill=white)
+    d.ellipse([46, 28, 49, 31], fill=(0, 0, 0, 255))
     return img
 
 
@@ -101,14 +95,14 @@ def get_menu_items(pystray):
             sub = []
             if port:
                 sub.append(pystray.MenuItem(
-                    f"Open in browser  :{port}",
+                    f"Open in browser :{port}",
                     make_open_cb(port)
                 ))
             sub.append(pystray.MenuItem(
                 "Restart",
                 make_restart_cb(name)
             ))
-            items.append(pystray.MenuItem(f"  {name}", pystray.Menu(*sub)))
+            items.append(pystray.MenuItem(name, pystray.Menu(*sub)))
     except Exception as e:
         items.append(pystray.MenuItem(f"Error: {type(e).__name__}: {e}", None))
 
