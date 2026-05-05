@@ -45,7 +45,7 @@ def get_containers():
 
 def get_container_snapshot():
     try:
-        return tuple(get_containers())
+        return tuple(sorted(get_containers(), key=container_sort_key))
     except Exception as e:
         return ((type(e).__name__, str(e)),)
 
@@ -68,6 +68,10 @@ def parse_container_line(line):
 
 def is_running(status):
     return status.startswith("Up ")
+
+
+def container_sort_key(container):
+    return container[0].lower()
 
 
 def extract_web_port(ports_str):
@@ -140,7 +144,7 @@ def poll_menu(icon):
 def get_menu_items(pystray):
     items = []
     try:
-        for name, running, port in get_containers():
+        for name, running, port in sorted(get_containers(), key=container_sort_key):
             sub = []
             if running and port:
                 sub.append(pystray.MenuItem(
