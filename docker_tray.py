@@ -2,6 +2,7 @@
 import re
 import subprocess
 import threading
+import time
 
 import gi
 
@@ -13,6 +14,7 @@ from PIL import Image, ImageDraw
 
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
+MENU_REFRESH_SECONDS = 5
 
 
 def make_icon():
@@ -100,6 +102,19 @@ def make_restart_cb(name):
     return lambda icon, item: restart_container(name)
 
 
+def start_menu_polling(icon):
+    threading.Thread(target=poll_menu, args=(icon,), daemon=True).start()
+
+
+def poll_menu(icon):
+    while getattr(icon, "_running", True):
+        time.sleep(MENU_REFRESH_SECONDS)
+        try:
+            icon.update_menu()
+        except Exception:
+            pass
+
+
 def get_menu_items(pystray):
     items = []
     try:
@@ -114,7 +129,7 @@ def get_menu_items(pystray):
                 "Restart",
                 make_restart_cb(name)
             ))
-            status_marker = "• " if running else ""
+            status_marker = "• " if running else "⚫ "
             label = (
                 f"{status_marker}{name}  :{port}"
                 if port else
@@ -140,7 +155,7 @@ def main():
         "Docker Monitor",
         menu=pystray.Menu(lambda: get_menu_items(pystray)),
     )
-    icon.run()
+    icon.run(setup=start_menu_polling)
 
 
 if __name__ == "__main__":

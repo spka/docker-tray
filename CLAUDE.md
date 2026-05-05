@@ -70,8 +70,13 @@ pgrep -af docker_tray.py
 
 ## Current Behavior
 
-The menu is rebuilt each time it opens. For every running container returned by
-`docker ps`, the app displays the container name and a submenu.
+The app polls the menu every 5 seconds with `icon.update_menu()`, because
+AppIndicator menus are not guaranteed to rebuild every time they open. For every
+container returned by `docker ps -a`, the app displays the container name and a
+submenu.
+
+Running containers, detected from Docker status strings beginning with `Up`, get
+a leading `•` marker. Stopped containers get a leading `⚫` marker.
 
 If the container exposes a host port matching either of these forms:
 
@@ -95,10 +100,11 @@ Do not switch this app to the Docker Python SDK casually. On this system the SDK
 failed with a `chunked` keyword error. The current app intentionally uses:
 
 ```bash
-docker ps --format "{{.Names}}\t{{.Ports}}"
+docker ps -a --format "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 ```
 
-and parses the output.
+This includes names, status, and ports so stopped containers can stay visible
+while running state changes.
 
 ### URL Opening on Wayland
 
@@ -172,8 +178,8 @@ menu=pystray.Menu(lambda: get_menu_items(pystray))
 ```
 
 Do not call `get_menu_items(pystray)` during icon construction. The current
-approach lets the menu reflect currently running containers each time the user
-opens it.
+approach, plus the 5-second `icon.update_menu()` poller, lets the menu reflect
+Docker status changes that happen outside the tray app.
 
 ## Troubleshooting
 
@@ -199,7 +205,7 @@ dependency path is the apt install command in the install section.
 Run:
 
 ```bash
-docker ps --format "{{.Names}}\t{{.Ports}}"
+docker ps -a --format "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 ```
 
 If that command fails or returns nothing, the tray app will not have containers
@@ -240,4 +246,4 @@ source of the original long debugging session.
   to connect to the display, which makes simple parser tests fail outside a
   normal desktop session.
 - If adding support for more port formats, update `extract_web_port()` and test
-  against real `docker ps --format` output.
+  against real `docker ps -a --format` output.
