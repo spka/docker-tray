@@ -76,7 +76,7 @@ guaranteed to rebuild every time they open. For every container returned by
 `docker ps -a`, the app displays the container name and a submenu.
 
 Running containers, detected from Docker status strings beginning with `Up`, get
-a leading `•` marker. Stopped containers get a leading `⚫` marker.
+a leading `•` marker. Stopped containers get a leading `◦` marker.
 
 If the container exposes a host port matching either of these forms:
 

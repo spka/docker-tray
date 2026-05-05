@@ -143,7 +143,7 @@ def get_menu_items(pystray):
                 "Restart",
                 make_restart_cb(name)
             ))
-            status_marker = "• " if running else "⚫ "
+            status_marker = "• " if running else "◦ "
             label = (
                 f"{status_marker}{name}  :{port}"
                 if port else
