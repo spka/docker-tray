@@ -70,10 +70,10 @@ pgrep -af docker_tray.py
 
 ## Current Behavior
 
-The app polls the menu every 5 seconds with `icon.update_menu()`, because
-AppIndicator menus are not guaranteed to rebuild every time they open. For every
-container returned by `docker ps -a`, the app displays the container name and a
-submenu.
+The app polls Docker state every 5 seconds and calls `icon.update_menu()` only
+when the container snapshot changes, because AppIndicator menus are not
+guaranteed to rebuild every time they open. For every container returned by
+`docker ps -a`, the app displays the container name and a submenu.
 
 Running containers, detected from Docker status strings beginning with `Up`, get
 a leading `•` marker. Stopped containers get a leading `⚫` marker.
@@ -178,8 +178,9 @@ menu=pystray.Menu(lambda: get_menu_items(pystray))
 ```
 
 Do not call `get_menu_items(pystray)` during icon construction. The current
-approach, plus the 5-second `icon.update_menu()` poller, lets the menu reflect
-Docker status changes that happen outside the tray app.
+approach, plus the 5-second Docker snapshot poller, lets the menu reflect Docker
+status changes that happen outside the tray app without redrawing the menu on
+every poll.
 
 Because the app passes a custom `setup` callback to `icon.run()`, that callback
 must set `icon.visible = True`. Without that line the process runs but the tray

@@ -43,6 +43,13 @@ def get_containers():
     return parse_containers(result.stdout)
 
 
+def get_container_snapshot():
+    try:
+        return tuple(get_containers())
+    except Exception as e:
+        return ((type(e).__name__, str(e)),)
+
+
 def parse_containers(output):
     containers = []
     for line in output.strip().splitlines():
@@ -108,8 +115,14 @@ def start_menu_polling(icon):
 
 
 def poll_menu(icon):
+    last_snapshot = get_container_snapshot()
     while getattr(icon, "_running", True):
         time.sleep(MENU_REFRESH_SECONDS)
+        current_snapshot = get_container_snapshot()
+        if current_snapshot == last_snapshot:
+            continue
+        last_snapshot = current_snapshot
+
         try:
             icon.update_menu()
         except Exception:
