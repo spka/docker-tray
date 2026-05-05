@@ -85,44 +85,6 @@ def make_restart_cb(name):
     return lambda icon, item: restart_container(name)
 
 
-def menu_label_markup(text):
-    name, sep, port = text.rpartition("  :")
-    if sep and port.isdigit():
-        return (
-            f"{GLib.markup_escape_text(name)}"
-            f"  <span foreground='#9a9a9a'>:{port}</span>"
-        )
-    return GLib.markup_escape_text(text)
-
-
-def enable_menu_markup(pystray):
-    from pystray import _base
-    from pystray._util.gtk import GtkIcon
-
-    def _create_menu_item(self, descriptor):
-        if descriptor is _base.Menu.SEPARATOR:
-            return Gtk.SeparatorMenuItem()
-
-        if descriptor.checked is not None:
-            menu_item = Gtk.CheckMenuItem.new_with_label(descriptor.text)
-            menu_item.set_active(descriptor.checked)
-            menu_item.set_draw_as_radio(descriptor.radio)
-        else:
-            menu_item = Gtk.MenuItem.new_with_label(descriptor.text)
-
-        if descriptor.submenu:
-            menu_item.set_submenu(self._create_menu(descriptor.submenu))
-        else:
-            menu_item.connect("activate", self._handler(descriptor))
-
-        label = menu_item.get_children()[0]
-        label.set_markup(menu_label_markup(descriptor.text))
-        menu_item.set_sensitive(descriptor.enabled)
-        return menu_item
-
-    GtkIcon._create_menu_item = _create_menu_item
-
-
 def get_menu_items(pystray):
     items = []
     try:
@@ -151,8 +113,6 @@ def get_menu_items(pystray):
 
 def main():
     import pystray
-
-    enable_menu_markup(pystray)
 
     icon = pystray.Icon(
         "docker-tray",
