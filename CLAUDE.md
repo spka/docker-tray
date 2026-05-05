@@ -11,8 +11,6 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 ## Files
 
 - `docker_tray.py` - main app.
-- `open_browser.sh` - older helper that uses `gio open`; kept as reference, not
-  used by the current Python app.
 - `requirements.txt` - Python package notes.
 - `~/.config/autostart/docker-tray.desktop` - starts the tray app on login.
 
@@ -75,10 +73,11 @@ pgrep -af docker_tray.py
 The menu is rebuilt each time it opens. For every running container returned by
 `docker ps`, the app displays the container name and a submenu.
 
-If the container exposes a host port matching this form:
+If the container exposes a host port matching either of these forms:
 
 ```text
 0.0.0.0:<host-port>-><container-port>/tcp
+127.0.0.1:<host-port>-><container-port>/tcp
 ```
 
 the submenu includes:
@@ -96,7 +95,7 @@ Do not switch this app to the Docker Python SDK casually. On this system the SDK
 failed with a `chunked` keyword error. The current app intentionally uses:
 
 ```bash
-docker ps --format "{{.Names}}\t{{.Status}}\t{{.Ports}}"
+docker ps --format "{{.Names}}\t{{.Ports}}"
 ```
 
 and parses the output.
@@ -126,7 +125,7 @@ bring back the bug where menu clicks do nothing while Firefox is open.
 Current implementation:
 
 ```python
-def open_url(port, name=""):
+def open_url(port):
     url = f"http://localhost:{port}"
 
     def _open():
@@ -157,8 +156,8 @@ Important details:
 for menu item callbacks:
 
 ```python
-def make_open_cb(p, n):
-    return lambda icon, item: open_url(p, n)
+def make_open_cb(port):
+    return lambda icon, item: open_url(port)
 ```
 
 Do not write callbacks that require `port`, `name`, `icon`, and `item` as direct
@@ -166,14 +165,15 @@ parameters.
 
 ### Dynamic Menu Refresh
 
-Pass the function itself into `pystray.Menu`:
+Pass a callable into `pystray.Menu`:
 
 ```python
-menu=pystray.Menu(get_menu_items)
+menu=pystray.Menu(lambda: get_menu_items(pystray))
 ```
 
-Do not call `get_menu_items()` during icon construction. The current approach
-lets the menu reflect currently running containers each time the user opens it.
+Do not call `get_menu_items(pystray)` during icon construction. The current
+approach lets the menu reflect currently running containers each time the user
+opens it.
 
 ## Troubleshooting
 
@@ -199,7 +199,7 @@ dependency path is the apt install command in the install section.
 Run:
 
 ```bash
-docker ps --format "{{.Names}}\t{{.Status}}\t{{.Ports}}"
+docker ps --format "{{.Names}}\t{{.Ports}}"
 ```
 
 If that command fails or returns nothing, the tray app will not have containers
@@ -207,14 +207,15 @@ to display. Fix Docker permissions or start the containers first.
 
 ### Container Has No Open Button
 
-The parser currently only recognizes ports exposed as:
+The parser currently recognizes ports exposed as:
 
 ```text
 0.0.0.0:<host-port>-><container-port>/tcp
+127.0.0.1:<host-port>-><container-port>/tcp
 ```
 
-Containers bound to IPv6, `127.0.0.1`, UDP-only ports, or unusual Docker output
-may need `extract_web_port()` to be expanded.
+Containers bound to IPv6, UDP-only ports, or unusual Docker output may need
+`extract_web_port()` to be expanded.
 
 ### Clicking Open Does Nothing
 
@@ -235,5 +236,8 @@ source of the original long debugging session.
 - Keep GTK URL opening in the main thread/main loop.
 - Preserve the 1x1 mapped-window activation bridge unless a replacement is
   tested on GNOME Wayland with already-running Flatpak Firefox.
+- Keep `pystray` imported inside `main()`. Importing it at module load can try
+  to connect to the display, which makes simple parser tests fail outside a
+  normal desktop session.
 - If adding support for more port formats, update `extract_web_port()` and test
   against real `docker ps --format` output.

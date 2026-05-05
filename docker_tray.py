@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-import threading
-import subprocess
 import re
-import os
+import subprocess
+import threading
 
 import gi
-gi.require_version('Gtk', '3.0')
+
+gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib
 
-import pystray
 from PIL import Image, ImageDraw
+
+
+DOCKER_PS_FORMAT = "{{.Names}}\t{{.Ports}}"
+HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 
 
 def make_icon():
@@ -24,32 +27,33 @@ def make_icon():
 
 def get_containers():
     result = subprocess.run(
-        ["docker", "ps", "--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}"],
-        capture_output=True, text=True
+        ["docker", "ps", "--format", DOCKER_PS_FORMAT],
+        capture_output=True,
+        text=True,
+        check=True,
     )
+
     containers = []
     for line in result.stdout.strip().splitlines():
-        parts = line.split("\t")
-        name = parts[0]
-        status = parts[1] if len(parts) > 1 else ""
-        ports = parts[2] if len(parts) > 2 else ""
-        port = extract_web_port(ports)
-        containers.append((name, status, port))
+        name, _, ports = line.partition("\t")
+        containers.append((name, extract_web_port(ports)))
     return containers
 
 
 def extract_web_port(ports_str):
-    match = re.search(r'0\.0\.0\.0:(\d+)->\d+/tcp', ports_str)
+    match = HOST_PORT_RE.search(ports_str)
     return match.group(1) if match else None
 
 
 def restart_container(name):
-    def _do():
-        subprocess.run(["docker", "restart", name])
-    threading.Thread(target=_do, daemon=True).start()
+    threading.Thread(
+        target=subprocess.run,
+        args=(["docker", "restart", name],),
+        daemon=True,
+    ).start()
 
 
-def open_url(port, name=""):
+def open_url(port):
     url = f"http://localhost:{port}"
 
     def _open():
@@ -67,21 +71,23 @@ def open_url(port, name=""):
     GLib.idle_add(_open)
 
 
-def make_open_cb(p, n):
-    return lambda icon, item: open_url(p, n)
+def make_open_cb(port):
+    return lambda icon, item: open_url(port)
 
-def make_restart_cb(n):
-    return lambda icon, item: restart_container(n)
 
-def get_menu_items():
+def make_restart_cb(name):
+    return lambda icon, item: restart_container(name)
+
+
+def get_menu_items(pystray):
     items = []
     try:
-        for name, status, port in get_containers():
+        for name, port in get_containers():
             sub = []
             if port:
                 sub.append(pystray.MenuItem(
                     f"Open in browser  :{port}",
-                    make_open_cb(port, name)
+                    make_open_cb(port)
                 ))
             sub.append(pystray.MenuItem(
                 "Restart",
@@ -89,8 +95,6 @@ def get_menu_items():
             ))
             items.append(pystray.MenuItem(f"  {name}", pystray.Menu(*sub)))
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         items.append(pystray.MenuItem(f"Error: {type(e).__name__}: {e}", None))
 
     items += [
@@ -101,11 +105,13 @@ def get_menu_items():
 
 
 def main():
+    import pystray
+
     icon = pystray.Icon(
         "docker-tray",
         make_icon(),
         "Docker Monitor",
-        menu=pystray.Menu(get_menu_items),
+        menu=pystray.Menu(lambda: get_menu_items(pystray)),
     )
     icon.run()
 
