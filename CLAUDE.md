@@ -91,7 +91,7 @@ running container submenus include:
 - `Stop ▪`
 
 If a running container has a matching web port, it also includes
-`Open in browser ↗ :<host-port>`.
+`Open in browser ↗`.
 
 Stopped container submenus include:
 

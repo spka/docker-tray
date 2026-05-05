@@ -144,7 +144,7 @@ def get_menu_items(pystray):
             sub = []
             if running and port:
                 sub.append(pystray.MenuItem(
-                    f"  Open in browser ↗ :{port}",
+                    "  Open in browser ↗",
                     make_open_cb(port)
                 ))
             if running:
