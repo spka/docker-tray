@@ -11,7 +11,7 @@ from gi.repository import Gtk, GLib
 from PIL import Image, ImageDraw
 
 
-DOCKER_PS_FORMAT = "{{.Names}}\t{{.Ports}}"
+DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 
 
@@ -33,17 +33,32 @@ def make_icon():
 
 def get_containers():
     result = subprocess.run(
-        ["docker", "ps", "--format", DOCKER_PS_FORMAT],
+        ["docker", "ps", "-a", "--format", DOCKER_PS_FORMAT],
         capture_output=True,
         text=True,
         check=True,
     )
+    return parse_containers(result.stdout)
 
+
+def parse_containers(output):
     containers = []
-    for line in result.stdout.strip().splitlines():
-        name, _, ports = line.partition("\t")
-        containers.append((name, extract_web_port(ports)))
+    for line in output.strip().splitlines():
+        name, status, ports = parse_container_line(line)
+        containers.append((name, is_running(status), extract_web_port(ports)))
     return containers
+
+
+def parse_container_line(line):
+    parts = line.split("\t", 2)
+    name = parts[0]
+    status = parts[1] if len(parts) > 1 else ""
+    ports = parts[2] if len(parts) > 2 else ""
+    return name, status, ports
+
+
+def is_running(status):
+    return status.startswith("Up ")
 
 
 def extract_web_port(ports_str):
@@ -88,7 +103,7 @@ def make_restart_cb(name):
 def get_menu_items(pystray):
     items = []
     try:
-        for name, port in get_containers():
+        for name, running, port in get_containers():
             sub = []
             if port:
                 sub.append(pystray.MenuItem(
@@ -99,7 +114,12 @@ def get_menu_items(pystray):
                 "Restart",
                 make_restart_cb(name)
             ))
-            label = f"• {name}  :{port}" if port else f"• {name}"
+            status_marker = "• " if running else ""
+            label = (
+                f"{status_marker}{name}  :{port}"
+                if port else
+                f"{status_marker}{name}"
+            )
             items.append(pystray.MenuItem(label, pystray.Menu(*sub)))
     except Exception as e:
         items.append(pystray.MenuItem(f"Error: {type(e).__name__}: {e}", None))
