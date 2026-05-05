@@ -99,7 +99,8 @@ def get_menu_items(pystray):
                 "Restart",
                 make_restart_cb(name)
             ))
-            items.append(pystray.MenuItem(name, pystray.Menu(*sub)))
+            label = f"{name}  :{port}" if port else name
+            items.append(pystray.MenuItem(label, pystray.Menu(*sub)))
     except Exception as e:
         items.append(pystray.MenuItem(f"Error: {type(e).__name__}: {e}", None))
 
