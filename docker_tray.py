@@ -16,12 +16,27 @@ HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 
 
 def make_icon():
-    img = Image.new("RGB", (64, 64), color=(30, 144, 255))
+    img = Image.new("RGBA", (64, 64), color=(0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([8, 8, 56, 56], radius=12, fill=(20, 100, 200))
-    d.rectangle([18, 24, 46, 40], fill="white")
-    d.ellipse([22, 28, 30, 36], fill=(30, 144, 255))
-    d.ellipse([34, 28, 42, 36], fill=(30, 144, 255))
+
+    deep_blue = (12, 68, 120, 255)
+    mid_blue = (20, 124, 190, 255)
+    light_blue = (116, 204, 232, 255)
+    foam = (232, 250, 255, 255)
+
+    d.ellipse([7, 33, 57, 58], fill=deep_blue)
+    d.pieslice([6, 21, 58, 59], 14, 166, fill=mid_blue)
+    d.arc([12, 30, 52, 62], 190, 350, fill=light_blue, width=3)
+
+    d.polygon([(32, 30), (20, 8), (29, 10), (36, 25)], fill=deep_blue)
+    d.polygon([(32, 30), (44, 8), (35, 10), (28, 25)], fill=deep_blue)
+    d.polygon([(28, 18), (15, 12), (21, 7), (34, 23)], fill=mid_blue)
+    d.polygon([(36, 18), (49, 12), (43, 7), (30, 23)], fill=mid_blue)
+    d.line([(32, 27), (32, 38)], fill=foam, width=3)
+
+    d.ellipse([20, 35, 44, 47], fill=foam)
+    d.ellipse([22, 32, 42, 43], fill=mid_blue)
+    d.arc([17, 38, 47, 54], 200, 340, fill=foam, width=2)
     return img
 
 
