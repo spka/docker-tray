@@ -103,6 +103,7 @@ def make_restart_cb(name):
 
 
 def start_menu_polling(icon):
+    icon.visible = True
     threading.Thread(target=poll_menu, args=(icon,), daemon=True).start()
 
 

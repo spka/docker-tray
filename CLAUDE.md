@@ -181,6 +181,10 @@ Do not call `get_menu_items(pystray)` during icon construction. The current
 approach, plus the 5-second `icon.update_menu()` poller, lets the menu reflect
 Docker status changes that happen outside the tray app.
 
+Because the app passes a custom `setup` callback to `icon.run()`, that callback
+must set `icon.visible = True`. Without that line the process runs but the tray
+icon does not appear.
+
 ## Troubleshooting
 
 ### Tray Icon Does Not Appear
