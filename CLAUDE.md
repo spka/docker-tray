@@ -88,7 +88,7 @@ If the container exposes a host port matching either of these forms:
 running container submenus include:
 
 - `Restart ↻`
-- `Stop ▪`
+- `Stop ✕`
 
 If a running container has a matching web port, it also includes
 `Open in browser ↗`.

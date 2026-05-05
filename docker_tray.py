@@ -150,7 +150,7 @@ def get_menu_items(pystray):
             if running:
                 sub += [
                     pystray.MenuItem("  Restart ↻", make_restart_cb(name)),
-                    pystray.MenuItem("  Stop ▪", make_stop_cb(name)),
+                    pystray.MenuItem("  Stop ✕", make_stop_cb(name)),
                 ]
             else:
                 sub.append(pystray.MenuItem("  Start ▸", make_start_cb(name)))
