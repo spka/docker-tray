@@ -92,18 +92,17 @@ def get_menu_items(pystray):
     items = []
     try:
         for name, port in get_containers():
+            sub = []
             if port:
-                items.append(pystray.MenuItem(
-                    f"{name}  :{port}",
+                sub.append(pystray.MenuItem(
+                    f"Open in browser :{port}",
                     make_open_cb(port)
                 ))
-            else:
-                items.append(pystray.MenuItem(name, None, enabled=False))
-
-            items.append(pystray.MenuItem(
-                f"Restart {name}",
+            sub.append(pystray.MenuItem(
+                "Restart",
                 make_restart_cb(name)
             ))
+            items.append(pystray.MenuItem(name, pystray.Menu(*sub)))
     except Exception as e:
         items.append(pystray.MenuItem(f"Error: {type(e).__name__}: {e}", None))
 
