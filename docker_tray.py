@@ -19,15 +19,15 @@ def make_icon():
     img = Image.new("RGBA", (64, 64), color=(0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    badge = (44, 48, 54, 255)
-    white = (255, 255, 255, 255)
+    badge = (255, 255, 255, 255)
+    spout = (0, 0, 0, 255)
 
     d.rounded_rectangle([6, 6, 58, 58], radius=14, fill=badge)
 
-    d.arc([17, 17, 32, 36], 190, 345, fill=white, width=4)
-    d.arc([32, 17, 47, 36], 195, 350, fill=white, width=4)
-    d.line([32, 34, 32, 47], fill=white, width=4)
-    d.ellipse([29, 44, 35, 50], fill=white)
+    d.arc([17, 17, 32, 36], 190, 345, fill=spout, width=4)
+    d.arc([32, 17, 47, 36], 195, 350, fill=spout, width=4)
+    d.line([32, 34, 32, 47], fill=spout, width=4)
+    d.ellipse([29, 44, 35, 50], fill=spout)
     return img
 
 
