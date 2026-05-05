@@ -87,15 +87,15 @@ If the container exposes a host port matching either of these forms:
 
 running container submenus include:
 
-- `Restart`
-- `Stop`
+- `↻ Restart`
+- `■ Stop`
 
 If a running container has a matching web port, it also includes
-`Open in browser :<host-port>`.
+`↗ Open in browser :<host-port>`.
 
 Stopped container submenus include:
 
-- `Start`
+- `▶ Start`
 
 ## Key Design Decisions
 
