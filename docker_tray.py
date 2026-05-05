@@ -19,18 +19,28 @@ def make_icon():
     img = Image.new("RGBA", (64, 64), color=(0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
+    badge = (44, 48, 54, 255)
+    blue = (65, 166, 235, 255)
+    shadow_blue = (25, 123, 203, 255)
     white = (255, 255, 255, 255)
+    cutout = badge
 
-    d.rectangle([13, 30, 43, 38], fill=white)
-    d.rectangle([17, 22, 24, 28], fill=white)
-    d.rectangle([26, 22, 33, 28], fill=white)
-    d.rectangle([35, 22, 42, 28], fill=white)
-    d.rectangle([26, 14, 33, 20], fill=white)
+    d.rounded_rectangle([6, 6, 58, 58], radius=14, fill=badge)
 
-    d.polygon([(45, 29), (55, 25), (52, 34)], fill=white)
-    d.pieslice([9, 24, 56, 52], 0, 180, fill=white)
-    d.rectangle([9, 38, 50, 41], fill=white)
-    d.ellipse([46, 28, 49, 31], fill=(0, 0, 0, 255))
+    d.arc([20, 8, 32, 23], 190, 345, fill=white, width=3)
+    d.arc([32, 8, 44, 23], 195, 350, fill=white, width=3)
+    d.line([32, 23, 32, 29], fill=white, width=3)
+
+    d.pieslice([12, 25, 52, 55], 0, 180, fill=blue)
+    d.rectangle([15, 39, 48, 43], fill=blue)
+    d.polygon([(48, 33), (58, 28), (54, 40)], fill=blue)
+    d.rectangle([18, 42, 47, 44], fill=shadow_blue)
+
+    d.pieslice([17, 30, 27, 49], 180, 360, fill=cutout)
+    d.pieslice([26, 30, 38, 50], 180, 360, fill=cutout)
+    d.pieslice([37, 30, 49, 49], 180, 360, fill=cutout)
+    d.ellipse([43, 32, 46, 35], fill=badge)
+    d.ellipse([24, 29, 36, 35], fill=white)
     return img
 
 
