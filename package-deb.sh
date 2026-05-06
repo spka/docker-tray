@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.1.0}"
+version="${1:-0.1.1}"
 package="docker-tray"
 root="dist/${package}_${version}_all"
 
@@ -9,6 +9,7 @@ rm -rf "$root"
 mkdir -p \
   "$root/DEBIAN" \
   "$root/usr/bin" \
+  "$root/usr/share/applications" \
   "$root/usr/share/docker-tray" \
   "$root/usr/share/doc/docker-tray"
 
@@ -30,6 +31,18 @@ install -m 0755 docker_tray.py "$root/usr/bin/docker-tray"
 install -m 0644 icon-dark.png icon-light.png "$root/usr/share/docker-tray/"
 install -m 0644 README.md "$root/usr/share/doc/docker-tray/README.md"
 install -m 0644 LICENSE "$root/usr/share/doc/docker-tray/copyright"
+
+cat > "$root/usr/share/applications/docker-tray.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Docker Tray
+Exec=docker-tray
+Icon=docker
+Comment=Docker container monitor in the system tray
+Categories=Utility;
+Terminal=false
+DESKTOP
+chmod 0644 "$root/usr/share/applications/docker-tray.desktop"
 
 find "$root" -type d -exec chmod 0755 {} +
 dpkg-deb --root-owner-group --build "$root" "dist/${package}_${version}_all.deb"
