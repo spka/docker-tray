@@ -22,11 +22,13 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 - `GTK3` via `gi.repository.Gtk` and `GLib` - required for Wayland-aware URL
   opening.
 - Python stdlib `subprocess` - Docker interaction through `docker ps` and
-  `docker restart`.
+  `docker restart`, and `docker compose -f <file> up -d`.
 - Python stdlib `shutil` - checks whether the `docker` CLI exists before trying
   to list containers.
 - `~/.config/autostart/docker-tray.desktop` - managed by the tray menu's
   `Settings -> Start at boot` toggle.
+- `~/.config/docker-tray/compose-files.txt` - selected Docker Compose files
+  shown under `Settings -> Compose files`.
 
 ## Install
 
@@ -227,6 +229,37 @@ which appears before the item text.
 
 If the desktop file is missing, the toggle recreates it with the current script
 path in the `Exec=` line and enables autostart.
+
+### Compose File Launcher
+
+The tray menu also has `Settings -> Compose files`. It scans the current user's
+home directory for:
+
+- `compose.yml`
+- `compose.yaml`
+- `docker-compose.yml`
+- `docker-compose.yaml`
+
+The app does not scan for these files at startup or while opening the regular
+tray menu. The scan starts only when the user clicks `Search compose files`.
+Clicking a tray menu action closes the AppIndicator menu, so the app also opens
+a small GTK loader window while the background scan runs. If the compose submenu
+is opened during the scan, it shows `Searching...`.
+
+Found files are not added automatically. After the scan completes, the user has
+to choose one from `Add found compose file`, which saves the path in:
+
+```text
+~/.config/docker-tray/compose-files.txt
+```
+
+Each saved compose file gets a submenu with:
+
+- `Start` - runs `docker compose -f <file> up -d`
+- `Remove` - removes the saved path from the tray app list
+
+The scan skips hidden directories plus `.cache`, `.git`, `.local/share/Trash`,
+`__pycache__`, and `node_modules`.
 
 ## Troubleshooting
 
