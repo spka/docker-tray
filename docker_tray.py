@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -1096,15 +1098,49 @@ def check_engine_update():
     return False, ""
 
 
+def _local_arch():
+    m = platform.machine()
+    return "amd64" if m == "x86_64" else m
+
+
+def get_local_image_id(image):
+    result = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def get_remote_config_digest(image):
+    result = subprocess.run(
+        ["docker", "manifest", "inspect", "--verbose", image],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except Exception:
+        return None
+    arch = _local_arch()
+    if isinstance(data, list):
+        for entry in data:
+            p = entry.get("Descriptor", {}).get("platform", {})
+            if p.get("architecture") == arch and p.get("os") == "linux":
+                return entry.get("SchemaV2Manifest", {}).get("config", {}).get("digest")
+        return None
+    return data.get("SchemaV2Manifest", {}).get("config", {}).get("digest")
+
+
 def check_image_updates():
     result = run_docker_capture(["docker", "ps", "-a", "--format", "{{.Image}}"], check=False)
     images = sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
-    updated = []
-    for image in images:
-        pull = subprocess.run(["docker", "pull", image], capture_output=True, text=True)
-        if "Downloaded newer image" in pull.stdout:
-            updated.append(image)
-    return updated
+    return [
+        image for image in images
+        if (local := get_local_image_id(image))
+        and (remote := get_remote_config_digest(image))
+        and local != remote
+    ]
 
 
 def run_update_check(icon):
@@ -1195,7 +1231,7 @@ def show_updates_dialog():
         box.pack_start(cmd, False, False, 0)
 
     if update_check_state["image_updates"]:
-        images_label = Gtk.Label(label="Images pulled:")
+        images_label = Gtk.Label(label="Image updates available:")
         images_label.set_xalign(0)
         box.pack_start(images_label, False, False, 0)
         for image in update_check_state["image_updates"]:
@@ -1234,7 +1270,7 @@ def get_menu_items(pystray):
     if update_check_state["engine_update"]:
         items.append(pystray.MenuItem("⬆️ Docker update available", open_updates_dialog))
     for image in update_check_state["image_updates"]:
-        items.append(pystray.MenuItem(f"⬆️ {image} updated", open_updates_dialog))
+        items.append(pystray.MenuItem(f"⬆️ {image} update available", open_updates_dialog))
     if items:
         items.append(pystray.Menu.SEPARATOR)
     if not is_docker_installed():
