@@ -36,16 +36,8 @@ sudo apt install /tmp/docker-tray_0.1.3_all.deb
 rm /tmp/docker-tray_0.1.3_all.deb
 ```
 
-Docker Tray starts automatically on login after installing the package. To start
-it right away, open **Docker Tray** from your app menu. You can disable or
-re-enable login startup from `Settings -> Start at boot` in the tray menu.
-
-The source checkout is only needed for development. To run from a cloned repo:
-
-```bash
-sudo apt install python3-pystray python3-pil python3-gi gir1.2-gtk-3.0
-python3 docker_tray.py
-```
+Docker Tray starts automatically on login after installing the package. You can
+turn autostart off from `Settings -> Start at boot` in the tray menu.
 
 Docker must already be installed, and your user must be able to run `docker`
 without a password.
