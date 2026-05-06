@@ -11,6 +11,8 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 ## Files
 
 - `docker_tray.py` - main app.
+- `icon-dark.png` - tray icon for dark panels (white badge, 256×256).
+- `icon-light.png` - tray icon for light panels (black badge, 256×256).
 - `requirements.txt` - Python package notes.
 - `~/.config/autostart/docker-tray.desktop` - starts the tray app on login.
 
@@ -18,9 +20,9 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 
 - `pystray` - system tray icon and dynamic menu.
 - `ayatana-appindicator3` backend - pystray backend used on Ubuntu/GNOME.
-- `Pillow` - draws the tray icon.
-- `GTK3` via `gi.repository.Gtk` and `GLib` - required for Wayland-aware URL
-  opening.
+- `Pillow` - loads the tray icon PNG.
+- `GTK3` via `gi.repository.Gtk`, `GLib`, and `Gio` - required for Wayland-aware
+  URL opening and light/dark theme detection.
 - Python stdlib `subprocess` - Docker interaction through `docker ps` and
   `docker restart`, and `docker compose -f <file> up -d`.
 - Python stdlib `shutil` - checks whether the `docker` CLI exists before trying
@@ -48,7 +50,7 @@ Autostart entry:
 Current autostart command:
 
 ```text
-python3 /home/stephan/development/docker-tray/docker_tray.py
+python3 /home/stephan/Development/docker-tray/docker_tray.py
 ```
 
 ## Run
@@ -56,14 +58,14 @@ python3 /home/stephan/development/docker-tray/docker_tray.py
 Start manually:
 
 ```bash
-python3 /home/stephan/development/docker-tray/docker_tray.py &
+python3 /home/stephan/Development/docker-tray/docker_tray.py &
 ```
 
 Restart after edits:
 
 ```bash
 pkill -f docker_tray.py
-python3 /home/stephan/development/docker-tray/docker_tray.py &
+python3 /home/stephan/Development/docker-tray/docker_tray.py &
 ```
 
 Check whether it is running:
@@ -94,15 +96,15 @@ If the container exposes a host port matching either of these forms:
 
 running container submenus include:
 
-- `Restart ↻`
-- `Stop ✕`
+- `🔄 Restart`
+- `⏹️ Stop`
 
 If a running container has a matching web port, it also includes
-`Open ↗`.
+`🔗 Open`.
 
 Stopped container submenus include:
 
-- `Start ▸`
+- `▶️ Start`
 
 ## Key Design Decisions
 
@@ -129,11 +131,22 @@ is on `PATH`. If it is missing, the menu shows:
 The download item opens Docker's official Ubuntu Engine install page:
 
 ```text
-https://docs.docker.com/installation/ubuntulinux/
+https://docs.docker.com/engine/install/ubuntu/
 ```
 
 Keep this pointed at official Docker documentation. The app still handles Docker
 daemon or permission errors separately through the normal error menu item.
+
+### Light/Dark Tray Icon
+
+The app ships two icon files — `icon-dark.png` (white badge, for dark panels) and
+`icon-light.png` (black badge, for light panels). On startup, `is_dark_mode()`
+reads `org.gnome.desktop.interface color-scheme` via `Gio.Settings` to pick the
+right file. A GSettings listener in `watch_theme()` swaps `icon.icon` live when
+the system theme changes — no restart needed.
+
+To replace the icons: put new 256×256 PNGs in the same directory and restart the
+app. Keep both files present; the app will crash on startup if either is missing.
 
 ### URL Opening on Wayland
 
@@ -324,7 +337,7 @@ PIDs and start one clean copy in the desktop session:
 kill <pid> <pid> ...
 setsid env DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
-  python3 /home/stephan/development/docker-tray/docker_tray.py \
+  python3 /home/stephan/Development/docker-tray/docker_tray.py \
   >/tmp/docker-tray.log 2>&1 < /dev/null &
 ```
 
