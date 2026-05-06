@@ -10,7 +10,7 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, GLib, Gio
 
 from PIL import Image
 
@@ -69,8 +69,28 @@ cleanup_dialog = {
 }
 
 
+ICON_DIR = Path(__file__).parent
+
+
+def is_dark_mode():
+    try:
+        settings = Gio.Settings.new("org.gnome.desktop.interface")
+        return settings.get_string("color-scheme") == "prefer-dark"
+    except Exception:
+        return True
+
+
 def make_icon():
-    return Image.open(Path(__file__).parent / "icon.png").convert("RGBA")
+    name = "icon-dark.png" if is_dark_mode() else "icon-light.png"
+    return Image.open(ICON_DIR / name).convert("RGBA")
+
+
+def watch_theme(icon):
+    settings = Gio.Settings.new("org.gnome.desktop.interface")
+    def on_changed(settings, key):
+        if key == "color-scheme":
+            icon.icon = make_icon()
+    settings.connect("changed", on_changed)
 
 
 def get_containers():
@@ -1029,6 +1049,7 @@ def make_stop_cb(name):
 
 def start_menu_polling(icon):
     icon.visible = True
+    watch_theme(icon)
     threading.Thread(target=poll_menu, args=(icon,), daemon=True).start()
 
 
