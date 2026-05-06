@@ -28,6 +28,13 @@ python3 docker_tray.py
 Docker must already be installed, and your user must be able to run `docker`
 without a password.
 
+Release packages can be installed with:
+
+```bash
+sudo apt install ./docker-tray_0.1.0_all.deb
+docker-tray
+```
+
 ## License
 
 MIT

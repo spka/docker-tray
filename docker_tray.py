@@ -81,7 +81,18 @@ updates_dialog = {
 }
 
 
-ICON_DIR = Path(__file__).parent
+ICON_NAMES = ("icon-dark.png", "icon-light.png")
+ICON_DIRS = (
+    Path(__file__).parent,
+    Path("/usr/share/docker-tray"),
+)
+
+
+def get_icon_dir():
+    for icon_dir in ICON_DIRS:
+        if all((icon_dir / name).exists() for name in ICON_NAMES):
+            return icon_dir
+    return ICON_DIRS[0]
 
 
 def is_dark_mode():
@@ -94,7 +105,7 @@ def is_dark_mode():
 
 def make_icon():
     name = "icon-dark.png" if is_dark_mode() else "icon-light.png"
-    return Image.open(ICON_DIR / name).convert("RGBA")
+    return Image.open(get_icon_dir() / name).convert("RGBA")
 
 
 def watch_theme(icon):
