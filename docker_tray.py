@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import fcntl
 import json
 import os
 import platform
@@ -87,6 +88,7 @@ ICON_DIRS = (
     Path(__file__).parent,
     Path("/usr/share/docker-tray"),
 )
+INSTANCE_LOCK_FILE = "docker-tray.lock"
 
 
 def get_icon_dir():
@@ -94,6 +96,37 @@ def get_icon_dir():
         if all((icon_dir / name).exists() for name in ICON_NAMES):
             return icon_dir
     return ICON_DIRS[0]
+
+
+def get_instance_lock_paths():
+    fallback_path = Path("/tmp") / f"docker-tray-{os.getuid()}.lock"
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        return (Path(runtime_dir) / INSTANCE_LOCK_FILE, fallback_path)
+    return (fallback_path,)
+
+
+def acquire_instance_lock():
+    lock_file = None
+    for lock_path in get_instance_lock_paths():
+        try:
+            lock_file = lock_path.open("w")
+            break
+        except OSError:
+            continue
+    if lock_file is None:
+        return None
+
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return None
+
+    lock_file.write(str(os.getpid()))
+    lock_file.truncate()
+    lock_file.flush()
+    return lock_file
 
 
 def is_dark_mode():
@@ -1347,13 +1380,20 @@ def get_menu_items(pystray):
 def main():
     import pystray
 
+    instance_lock = acquire_instance_lock()
+    if instance_lock is None:
+        return
+
     icon = pystray.Icon(
         "docker-tray",
         make_icon(),
         "Docker Monitor",
         menu=pystray.Menu(lambda: get_menu_items(pystray)),
     )
-    icon.run(setup=start_menu_polling)
+    try:
+        icon.run(setup=start_menu_polling)
+    finally:
+        instance_lock.close()
 
 
 if __name__ == "__main__":
