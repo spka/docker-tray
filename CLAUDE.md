@@ -231,10 +231,12 @@ path in the `Exec=` line and enables autostart.
 ### Compose File Launcher
 
 The tray menu has `Settings -> Search compose files`. It opens a small GTK
-dialog before scanning and shows the current user's home directory as the scan
-target. The user can cancel or confirm the scan.
+dialog before scanning. The dialog has a search-directory dropdown with common
+locations such as Home, development, Documents, Downloads, Desktop, `/srv`,
+`/opt`, `/etc`, and Whole system when those directories exist. The user can
+cancel or confirm the scan.
 
-When confirmed, it scans the current user's home directory for:
+When confirmed, it scans the chosen directory for:
 
 - `compose.yml`
 - `compose.yaml`
@@ -255,8 +257,14 @@ files that are not running get a `Run` button, which starts them with:
 docker compose -f <file> up -d
 ```
 
+After `Run` is clicked, the dialog changes the button to `Starting` and polls
+Docker for up to about a minute. Once Docker reports a running container for
+that compose file, the row changes to `Running`; if it never appears running,
+the `Run` button is enabled again.
+
 The scan skips hidden directories plus `.cache`, `.git`, `.local/share/Trash`,
-`__pycache__`, and `node_modules`.
+`__pycache__`, `node_modules`, and heavy/pseudo-system paths such as `/proc`,
+`/sys`, `/dev`, `/run`, `/tmp`, `/var/lib/docker`, and `/var/lib/containerd`.
 
 If Docker is not available or the user cannot read Docker state, the scan still
 lists the compose files and treats their running state as unknown, which means
