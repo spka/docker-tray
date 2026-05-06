@@ -12,7 +12,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
@@ -70,19 +70,7 @@ cleanup_dialog = {
 
 
 def make_icon():
-    img = Image.new("RGBA", (64, 64), color=(0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-
-    badge = (255, 255, 255, 255)
-    spout = (0, 0, 0, 255)
-
-    d.rounded_rectangle([6, 6, 58, 58], radius=14, fill=badge)
-
-    d.arc([17, 17, 32, 36], 190, 345, fill=spout, width=4)
-    d.arc([32, 17, 47, 36], 195, 350, fill=spout, width=4)
-    d.line([32, 34, 32, 47], fill=spout, width=4)
-    d.ellipse([29, 44, 35, 50], fill=spout)
-    return img
+    return Image.open(Path(__file__).parent / "icon.png").convert("RGBA")
 
 
 def get_containers():
