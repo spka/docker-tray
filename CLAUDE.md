@@ -27,8 +27,6 @@ testing the tray menu against an already-running Flatpak Firefox instance.
   to list containers.
 - `~/.config/autostart/docker-tray.desktop` - managed by the tray menu's
   `Settings -> Start at boot` toggle.
-- `~/.config/docker-tray/compose-files.txt` - selected Docker Compose files
-  shown under `Settings -> Compose files`.
 
 ## Install
 
@@ -232,8 +230,11 @@ path in the `Exec=` line and enables autostart.
 
 ### Compose File Launcher
 
-The tray menu also has `Settings -> Compose files`. It scans the current user's
-home directory for:
+The tray menu has `Settings -> Search compose files`. It opens a small GTK
+dialog before scanning and shows the current user's home directory as the scan
+target. The user can cancel or confirm the scan.
+
+When confirmed, it scans the current user's home directory for:
 
 - `compose.yml`
 - `compose.yaml`
@@ -241,25 +242,25 @@ home directory for:
 - `docker-compose.yaml`
 
 The app does not scan for these files at startup or while opening the regular
-tray menu. The scan starts only when the user clicks `Search compose files`.
-Clicking a tray menu action closes the AppIndicator menu, so the app also opens
-a small GTK loader window while the background scan runs. If the compose submenu
-is opened during the scan, it shows `Searching...`.
+tray menu. After confirmation, the dialog shows a spinner while the background
+scan runs. If no compose files are found, it shows a short message and closes
+after a visible countdown.
 
-Found files are not added automatically. After the scan completes, the user has
-to choose one from `Add found compose file`, which saves the path in:
+After the scan completes, the dialog lists every found compose file. It asks
+Docker for Compose labels on existing containers using `docker ps -a`, then
+marks compose files with at least one running container as `Running`. Compose
+files that are not running get a `Run` button, which starts them with:
 
-```text
-~/.config/docker-tray/compose-files.txt
+```bash
+docker compose -f <file> up -d
 ```
-
-Each saved compose file gets a submenu with:
-
-- `Start` - runs `docker compose -f <file> up -d`
-- `Remove` - removes the saved path from the tray app list
 
 The scan skips hidden directories plus `.cache`, `.git`, `.local/share/Trash`,
 `__pycache__`, and `node_modules`.
+
+If Docker is not available or the user cannot read Docker state, the scan still
+lists the compose files and treats their running state as unknown, which means
+they get a `Run` button.
 
 ## Troubleshooting
 

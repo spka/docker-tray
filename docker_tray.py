@@ -16,13 +16,17 @@ from PIL import Image, ImageDraw
 
 
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
+DOCKER_COMPOSE_LABEL_FORMAT = (
+    "{{.Names}}\t"
+    "{{.Status}}\t"
+    "{{.Label \"com.docker.compose.project.config_files\"}}\t"
+    "{{.Label \"com.docker.compose.project.working_dir\"}}"
+)
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
-APP_CONFIG_DIR = Path.home() / ".config" / "docker-tray"
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
 DOCKER_INSTALL_URL = "https://docs.docker.com/installation/ubuntulinux/"
-COMPOSE_SELECTION_FILE = APP_CONFIG_DIR / "compose-files.txt"
 COMPOSE_FILE_NAMES = {
     "compose.yml",
     "compose.yaml",
@@ -46,6 +50,7 @@ compose_scan_loader = {
     "window": None,
     "spinner": None,
     "label": None,
+    "content": None,
 }
 
 
@@ -159,6 +164,58 @@ def scan_compose_files(root=Path.home()):
     return sorted(compose_files, key=compose_file_sort_key)
 
 
+def normalize_compose_path(path):
+    return Path(path).expanduser().resolve(strict=False)
+
+
+def get_compose_file_states_from_containers():
+    result = subprocess.run(
+        ["docker", "ps", "-a", "--format", DOCKER_COMPOSE_LABEL_FORMAT],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    compose_states = {}
+
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) < 4:
+            continue
+
+        status = parts[1].strip()
+        config_files = parts[2].strip()
+        working_dir = parts[3].strip()
+        if not config_files:
+            continue
+
+        for config_file in config_files.split(","):
+            config_file = config_file.strip()
+            if not config_file:
+                continue
+            config_path = Path(config_file)
+            if not config_path.is_absolute() and working_dir:
+                config_path = Path(working_dir, config_path)
+            normalized_path = normalize_compose_path(config_path)
+            compose_states[normalized_path] = (
+                compose_states.get(normalized_path, False) or is_running(status)
+            )
+
+    return compose_states
+
+
+def get_scanned_compose_files_with_states():
+    compose_files = scan_compose_files()
+    try:
+        compose_states = get_compose_file_states_from_containers()
+    except Exception:
+        compose_states = {}
+
+    return [
+        (compose_file, compose_states.get(normalize_compose_path(compose_file)))
+        for compose_file in compose_files
+    ]
+
+
 def compose_file_sort_key(compose_file):
     try:
         return str(compose_file.relative_to(Path.home())).lower()
@@ -177,49 +234,6 @@ def compose_file_label(compose_file):
     return str(rel)
 
 
-def read_selected_compose_files():
-    try:
-        paths = [
-            Path(line.strip())
-            for line in COMPOSE_SELECTION_FILE.read_text().splitlines()
-            if line.strip()
-        ]
-    except FileNotFoundError:
-        return []
-    except Exception:
-        return []
-
-    return sorted(paths, key=lambda path: str(path).lower())
-
-
-def write_selected_compose_files(compose_files):
-    APP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    unique_paths = sorted({str(path) for path in compose_files})
-    text = "\n".join(unique_paths)
-    COMPOSE_SELECTION_FILE.write_text(f"{text}\n" if text else "")
-
-
-def add_selected_compose_file(compose_file):
-    selected = read_selected_compose_files()
-    if compose_file not in selected:
-        selected.append(compose_file)
-        write_selected_compose_files(selected)
-
-
-def remove_selected_compose_file(compose_file):
-    selected = [
-        selected_file
-        for selected_file in read_selected_compose_files()
-        if selected_file != compose_file
-    ]
-    write_selected_compose_files(selected)
-
-
-def get_compose_scan_state():
-    with compose_scan_lock:
-        return dict(compose_scan_state)
-
-
 def update_tray_menu(icon):
     try:
         icon.update_menu()
@@ -227,17 +241,96 @@ def update_tray_menu(icon):
         pass
 
 
-def show_compose_scan_loader():
+def clear_compose_scan_window():
+    compose_scan_loader["window"] = None
+    compose_scan_loader["spinner"] = None
+    compose_scan_loader["label"] = None
+    compose_scan_loader["content"] = None
+    return GLib.SOURCE_REMOVE
+
+
+def destroy_compose_scan_window():
+    window = compose_scan_loader["window"]
+    if window is not None:
+        window.destroy()
+    clear_compose_scan_window()
+    return GLib.SOURCE_REMOVE
+
+
+def ensure_compose_scan_window(icon):
     if compose_scan_loader["window"] is not None:
         compose_scan_loader["window"].present()
-        return GLib.SOURCE_REMOVE
+        return compose_scan_loader["window"]
 
     window = Gtk.Window(title="Docker Tray")
-    window.set_default_size(260, 88)
+    window.set_default_size(460, 180)
     window.set_resizable(False)
     window.set_keep_above(True)
     window.set_skip_taskbar_hint(True)
     window.set_position(Gtk.WindowPosition.CENTER)
+    window.connect("destroy", lambda w: clear_compose_scan_window())
+
+    compose_scan_loader["window"] = window
+    return window
+
+
+def set_compose_scan_content(content):
+    window = compose_scan_loader["window"]
+    old_content = compose_scan_loader["content"]
+    if window is None:
+        return
+    if old_content is not None:
+        window.remove(old_content)
+    compose_scan_loader["content"] = content
+    window.add(content)
+    window.show_all()
+    window.present()
+
+
+def make_dialog_box():
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    box.set_border_width(16)
+    return box
+
+
+def open_compose_scan_dialog(icon):
+    ensure_compose_scan_window(icon)
+
+    box = make_dialog_box()
+
+    title = Gtk.Label(label="Search for compose files?")
+    title.set_xalign(0)
+
+    location = Gtk.Label(label=f"Directory: {Path.home()}")
+    location.set_xalign(0)
+    location.set_line_wrap(True)
+
+    detail = Gtk.Label(label="After scanning, each compose file will show whether it is running.")
+    detail.set_xalign(0)
+    detail.set_line_wrap(True)
+
+    buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    buttons.set_halign(Gtk.Align.END)
+
+    cancel_button = Gtk.Button(label="Cancel")
+    cancel_button.connect("clicked", lambda button: destroy_compose_scan_window())
+
+    search_button = Gtk.Button(label="Search")
+    search_button.connect("clicked", lambda button: start_compose_scan(icon))
+
+    buttons.pack_start(cancel_button, False, False, 0)
+    buttons.pack_start(search_button, False, False, 0)
+
+    box.pack_start(title, False, False, 0)
+    box.pack_start(location, False, False, 0)
+    box.pack_start(detail, False, False, 0)
+    box.pack_start(buttons, False, False, 0)
+    set_compose_scan_content(box)
+    return GLib.SOURCE_REMOVE
+
+
+def show_compose_scan_progress(icon):
+    ensure_compose_scan_window(icon)
 
     box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
     box.set_border_width(16)
@@ -250,55 +343,126 @@ def show_compose_scan_loader():
 
     box.pack_start(spinner, False, False, 0)
     box.pack_start(label, True, True, 0)
-    window.add(box)
-    window.show_all()
 
-    compose_scan_loader["window"] = window
     compose_scan_loader["spinner"] = spinner
     compose_scan_loader["label"] = label
+    set_compose_scan_content(box)
     return GLib.SOURCE_REMOVE
 
 
-def close_compose_scan_loader(message):
+def stop_compose_scan_spinner():
+    spinner = compose_scan_loader["spinner"]
+    if spinner is not None:
+        spinner.stop()
+    compose_scan_loader["spinner"] = None
+
+
+def run_compose_file_from_dialog(compose_file, icon, button):
+    run_compose_up(compose_file)
+    button.set_label("Starting")
+    button.set_sensitive(False)
+    update_tray_menu(icon)
+
+
+def close_compose_scan_window_countdown(label, remaining):
     window = compose_scan_loader["window"]
     if window is None:
         return GLib.SOURCE_REMOVE
+    if remaining <= 0:
+        return destroy_compose_scan_window()
 
-    spinner = compose_scan_loader["spinner"]
-    label = compose_scan_loader["label"]
-    if spinner is not None:
-        spinner.stop()
-    if label is not None:
-        label.set_text(message)
+    label.set_text(f"No compose files found. Closing in {remaining}...")
+    GLib.timeout_add(1000, close_compose_scan_window_countdown, label, remaining - 1)
+    return GLib.SOURCE_REMOVE
 
-    def _destroy():
-        current_window = compose_scan_loader["window"]
-        if current_window is not None:
-            current_window.destroy()
-        compose_scan_loader["window"] = None
-        compose_scan_loader["spinner"] = None
-        compose_scan_loader["label"] = None
+
+def show_compose_scan_results(icon, results, error):
+    ensure_compose_scan_window(icon)
+    stop_compose_scan_spinner()
+
+    box = make_dialog_box()
+
+    if error:
+        message = Gtk.Label(label=f"Compose search failed: {error}")
+        message.set_xalign(0)
+        message.set_line_wrap(True)
+        close_button = Gtk.Button(label="Close")
+        close_button.connect("clicked", lambda button: destroy_compose_scan_window())
+        close_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        close_row.set_halign(Gtk.Align.END)
+        close_row.pack_start(close_button, False, False, 0)
+        box.pack_start(message, False, False, 0)
+        box.pack_start(close_row, False, False, 0)
+        set_compose_scan_content(box)
         return GLib.SOURCE_REMOVE
 
-    GLib.timeout_add(1200, _destroy)
+    if not results:
+        message = Gtk.Label(label="No compose files found. Closing in 3...")
+        message.set_xalign(0)
+        box.pack_start(message, False, False, 0)
+        set_compose_scan_content(box)
+        GLib.timeout_add(1000, close_compose_scan_window_countdown, message, 2)
+        return GLib.SOURCE_REMOVE
+
+    title = Gtk.Label(label=f"Found {len(results)} compose file(s)")
+    title.set_xalign(0)
+    box.pack_start(title, False, False, 0)
+
+    scroller = Gtk.ScrolledWindow()
+    scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroller.set_min_content_height(180)
+
+    list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    for compose_file, running in results:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row_label = Gtk.Label(label=compose_file_label(compose_file))
+        row_label.set_xalign(0)
+        row_label.set_hexpand(True)
+        row_label.set_line_wrap(True)
+
+        if running:
+            action = Gtk.Label(label="Running")
+            action.set_xalign(1)
+        else:
+            action = Gtk.Button(label="Run")
+            action.connect(
+                "clicked",
+                lambda button, path=compose_file: run_compose_file_from_dialog(path, icon, button),
+            )
+
+        row.pack_start(row_label, True, True, 0)
+        row.pack_start(action, False, False, 0)
+        list_box.pack_start(row, False, False, 0)
+
+    scroller.add(list_box)
+    box.pack_start(scroller, True, True, 0)
+
+    close_button = Gtk.Button(label="Close")
+    close_button.connect("clicked", lambda button: destroy_compose_scan_window())
+    close_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+    close_row.set_halign(Gtk.Align.END)
+    close_row.pack_start(close_button, False, False, 0)
+    box.pack_start(close_row, False, False, 0)
+
+    set_compose_scan_content(box)
     return GLib.SOURCE_REMOVE
 
 
 def start_compose_scan(icon):
     with compose_scan_lock:
         if compose_scan_state["running"]:
-            GLib.idle_add(show_compose_scan_loader)
+            show_compose_scan_progress(icon)
             return
         compose_scan_state["running"] = True
         compose_scan_state["results"] = None
         compose_scan_state["error"] = None
 
-    GLib.idle_add(show_compose_scan_loader)
+    show_compose_scan_progress(icon)
     update_tray_menu(icon)
 
     def _scan():
         try:
-            results = scan_compose_files()
+            results = get_scanned_compose_files_with_states()
             error = None
         except Exception as e:
             results = []
@@ -310,10 +474,7 @@ def start_compose_scan(icon):
             compose_scan_state["error"] = error
 
         update_tray_menu(icon)
-        if error:
-            GLib.idle_add(close_compose_scan_loader, "Compose search failed")
-        else:
-            GLib.idle_add(close_compose_scan_loader, f"Found {len(results)} compose file(s)")
+        GLib.idle_add(show_compose_scan_results, icon, results, error)
 
     threading.Thread(target=_scan, daemon=True).start()
 
@@ -407,28 +568,8 @@ def make_install_docker_cb():
     return lambda icon, item: open_docker_install()
 
 
-def make_compose_start_cb(compose_file):
-    return lambda icon, item: run_compose_up(compose_file)
-
-
-def make_compose_add_cb(compose_file):
-    def _add(icon, item):
-        add_selected_compose_file(compose_file)
-        update_tray_menu(icon)
-
-    return _add
-
-
-def make_compose_remove_cb(compose_file):
-    def _remove(icon, item):
-        remove_selected_compose_file(compose_file)
-        update_tray_menu(icon)
-
-    return _remove
-
-
 def make_compose_search_cb():
-    return lambda icon, item: start_compose_scan(icon)
+    return lambda icon, item: GLib.idle_add(open_compose_scan_dialog, icon)
 
 
 def make_start_cb(name):
@@ -460,73 +601,9 @@ def poll_menu(icon):
         update_tray_menu(icon)
 
 
-def get_compose_file_items(pystray):
-    try:
-        selected_files = read_selected_compose_files()
-        scan_state = get_compose_scan_state()
-    except Exception as e:
-        return [pystray.MenuItem(f"Error: {type(e).__name__}: {e}", None)]
-
-    items = []
-    if selected_files:
-        for compose_file in selected_files:
-            items.append(pystray.MenuItem(
-                compose_file_label(compose_file),
-                pystray.Menu(
-                    pystray.MenuItem("Start", make_compose_start_cb(compose_file)),
-                    pystray.MenuItem("Remove", make_compose_remove_cb(compose_file)),
-                ),
-            ))
-    else:
-        items.append(pystray.MenuItem("No compose files added", None, enabled=False))
-
-    items += [
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Search compose files", make_compose_search_cb()),
-    ]
-
-    if scan_state["running"]:
-        items.append(pystray.MenuItem("Searching...", None, enabled=False))
-        return items
-
-    if scan_state["error"]:
-        items.append(pystray.MenuItem(f"Error: {scan_state['error']}", None, enabled=False))
-        return items
-
-    discovered_files = scan_state["results"]
-    if discovered_files is None:
-        return items
-
-    selected_set = set(selected_files)
-    available_files = [
-        compose_file
-        for compose_file in discovered_files
-        if compose_file not in selected_set
-    ]
-    if available_files:
-        add_items = [
-            pystray.MenuItem(
-                compose_file_label(compose_file),
-                make_compose_add_cb(compose_file),
-            )
-            for compose_file in available_files
-        ]
-    else:
-        add_items = [pystray.MenuItem("No new compose files found", None, enabled=False)]
-
-    items.append(pystray.MenuItem(
-        "Add found compose file",
-        pystray.Menu(*add_items),
-    ))
-    return items
-
-
 def get_settings_items(pystray):
     return [
-        pystray.MenuItem(
-            "Compose files",
-            pystray.Menu(lambda: get_compose_file_items(pystray)),
-        ),
+        pystray.MenuItem("Search compose files", make_compose_search_cb()),
         pystray.MenuItem(
             get_start_at_boot_label,
             toggle_start_at_boot,
