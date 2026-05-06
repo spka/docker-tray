@@ -98,7 +98,7 @@ running container submenus include:
 - `Stop ✕`
 
 If a running container has a matching web port, it also includes
-`Open in browser ↗`.
+`Open ↗`.
 
 Stopped container submenus include:
 
@@ -230,7 +230,7 @@ path in the `Exec=` line and enables autostart.
 
 ### Compose File Launcher
 
-The tray menu has `Settings -> Search compose files`. It opens a small GTK
+The tray menu has `Settings -> Compose search`. It opens a small GTK
 dialog before scanning. The dialog has a search-directory dropdown with common
 locations such as Home, development, Documents, Downloads, Desktop, `/srv`,
 `/opt`, `/etc`, and Whole system when those directories exist. The user can
@@ -272,7 +272,7 @@ they get a `Run` button.
 
 ### Docker Cleanup Check
 
-The tray menu has `Settings -> Docker cleanup`. It opens a GTK popup and checks
+The tray menu has `Settings -> Cleanup`. It opens a GTK popup and checks
 for conservative cleanup candidates:
 
 - stopped or created containers

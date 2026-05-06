@@ -1064,8 +1064,8 @@ def poll_menu(icon):
 
 def get_settings_items(pystray):
     return [
-        pystray.MenuItem("Search compose files", make_compose_search_cb()),
-        pystray.MenuItem("Docker cleanup", make_cleanup_cb()),
+        pystray.MenuItem("Compose search", make_compose_search_cb()),
+        pystray.MenuItem("Cleanup", make_cleanup_cb()),
         pystray.MenuItem(
             get_start_at_boot_label,
             toggle_start_at_boot,
@@ -1086,20 +1086,20 @@ def get_menu_items(pystray):
                 sub = []
                 if running and port:
                     sub.append(pystray.MenuItem(
-                        "  Open in browser ↗",
+                        "Open ↗",
                         make_open_cb(port)
                     ))
                 if running:
                     sub += [
-                        pystray.MenuItem("  Restart ↻", make_restart_cb(name)),
-                        pystray.MenuItem("  Stop ✕", make_stop_cb(name)),
+                        pystray.MenuItem("Restart ↻", make_restart_cb(name)),
+                        pystray.MenuItem("Stop ✕", make_stop_cb(name)),
                     ]
                 else:
-                    sub.append(pystray.MenuItem("  Start ▸", make_start_cb(name)))
+                    sub.append(pystray.MenuItem("Start ▸", make_start_cb(name)))
 
                 status_marker = "• " if running else "◦ "
                 label = (
-                    f"{status_marker}{name}  :{port}"
+                    f"{status_marker}{name} :{port}"
                     if port else
                     f"{status_marker}{name}"
                 )
