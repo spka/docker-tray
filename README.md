@@ -23,11 +23,12 @@ menu for quick checks and actions.
 For normal use, install the release package and run the packaged launcher:
 
 ```bash
-sudo apt install ./docker-tray_0.1.1_all.deb
+sudo apt install ./docker-tray_0.1.2_all.deb
 ```
 
-Then start **Docker Tray** from your app menu. You can also enable
-`Settings -> Start at boot` from the tray menu.
+Docker Tray starts automatically on login after installing the package. To start
+it right away, open **Docker Tray** from your app menu. You can disable or
+re-enable login startup from `Settings -> Start at boot` in the tray menu.
 
 The source checkout is only needed for development. To run from a cloned repo:
 

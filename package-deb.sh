@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.1.1}"
+version="${1:-0.1.2}"
 package="docker-tray"
 root="dist/${package}_${version}_all"
 
 rm -rf "$root"
 mkdir -p \
   "$root/DEBIAN" \
+  "$root/etc/xdg/autostart" \
   "$root/usr/bin" \
   "$root/usr/share/applications" \
   "$root/usr/share/docker-tray" \
@@ -43,6 +44,19 @@ Categories=Utility;
 Terminal=false
 DESKTOP
 chmod 0644 "$root/usr/share/applications/docker-tray.desktop"
+
+cat > "$root/etc/xdg/autostart/docker-tray.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Docker Tray
+Exec=docker-tray
+Icon=docker
+Comment=Docker container monitor in the system tray
+Categories=Utility;
+Terminal=false
+X-GNOME-Autostart-enabled=true
+DESKTOP
+chmod 0644 "$root/etc/xdg/autostart/docker-tray.desktop"
 
 find "$root" -type d -exec chmod 0755 {} +
 dpkg-deb --root-owner-group --build "$root" "dist/${package}_${version}_all.deb"

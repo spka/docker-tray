@@ -30,6 +30,7 @@ COMPOSE_START_POLL_SECONDS = 2
 COMPOSE_START_POLL_ATTEMPTS = 30
 UPDATE_CHECK_INTERVAL_SECONDS = 3600
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
+SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
 DOCKER_INSTALL_URL = "https://docs.docker.com/engine/install/ubuntu/"
 COMPOSE_FILE_NAMES = {
@@ -964,22 +965,38 @@ def start_compose_scan(icon, root):
 
 
 def read_autostart_enabled():
-    try:
-        for line in AUTOSTART_DESKTOP_FILE.read_text().splitlines():
+    files = (AUTOSTART_DESKTOP_FILE, SYSTEM_AUTOSTART_DESKTOP_FILE)
+    for desktop_file in files:
+        if not desktop_file.exists():
+            continue
+
+        try:
+            lines = desktop_file.read_text().splitlines()
+        except Exception:
+            continue
+
+        for line in lines:
             if line.startswith(AUTOSTART_ENABLED_PREFIX):
                 return line.split("=", 1)[1].strip().lower() == "true"
-    except Exception:
-        return False
+
+        return desktop_file == SYSTEM_AUTOSTART_DESKTOP_FILE
+
     return False
 
 
-def build_autostart_desktop(enabled):
+def get_autostart_exec():
     script_path = Path(__file__).resolve()
+    if script_path == Path("/usr/bin/docker-tray"):
+        return "docker-tray"
+    return f'python3 "{script_path}"'
+
+
+def build_autostart_desktop(enabled):
     return "\n".join([
         "[Desktop Entry]",
         "Type=Application",
         "Name=Docker Tray",
-        f'Exec=python3 "{script_path}"',
+        f"Exec={get_autostart_exec()}",
         "Icon=docker",
         "Comment=Docker container monitor in the system tray",
         f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}",
