@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.1.3}"
+version="${1:-0.1.4}"
 package="docker-tray"
 root="dist/${package}_${version}_all"
 
@@ -40,7 +40,7 @@ cat > "$root/usr/share/applications/docker-tray.desktop" <<DESKTOP
 Type=Application
 Name=Docker Tray
 Exec=docker-tray
-Icon=docker-tray
+Icon=/usr/share/docker-tray/icon-light.png
 Comment=Docker container monitor in the system tray
 Categories=Utility;
 Terminal=false
@@ -52,7 +52,7 @@ cat > "$root/etc/xdg/autostart/docker-tray.desktop" <<DESKTOP
 Type=Application
 Name=Docker Tray
 Exec=docker-tray
-Icon=docker-tray
+Icon=/usr/share/docker-tray/icon-light.png
 Comment=Docker container monitor in the system tray
 Categories=Utility;
 Terminal=false
