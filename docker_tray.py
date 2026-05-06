@@ -30,6 +30,8 @@ MENU_REFRESH_SECONDS = 5
 COMPOSE_START_POLL_SECONDS = 2
 COMPOSE_START_POLL_ATTEMPTS = 30
 UPDATE_CHECK_INTERVAL_SECONDS = 3600
+DOCKER_CMD_TIMEOUT_SECONDS = 15
+DOCKER_MANIFEST_TIMEOUT_SECONDS = 30
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
@@ -156,6 +158,7 @@ def get_containers():
         capture_output=True,
         text=True,
         check=True,
+        timeout=DOCKER_CMD_TIMEOUT_SECONDS,
     )
     return parse_containers(result.stdout)
 
@@ -222,6 +225,7 @@ def run_docker_capture(args, check=True):
         capture_output=True,
         text=True,
         check=check,
+        timeout=DOCKER_CMD_TIMEOUT_SECONDS,
     )
 
 
@@ -265,6 +269,7 @@ def get_compose_file_states_from_containers():
         capture_output=True,
         text=True,
         check=True,
+        timeout=DOCKER_CMD_TIMEOUT_SECONDS,
     )
     compose_states = {}
 
@@ -1143,12 +1148,14 @@ def check_engine_update():
     result = subprocess.run(
         ["apt", "list", "--upgradable"],
         capture_output=True, text=True,
+        timeout=DOCKER_CMD_TIMEOUT_SECONDS,
     )
+    arch = _local_arch()
     for line in result.stdout.splitlines():
         if not line.startswith("docker-ce/"):
             continue
         detail = ""
-        version_match = re.search(r"\s(\S+)\s+amd64", line)
+        version_match = re.search(rf"\s(\S+)\s+{arch}", line)
         current_match = re.search(r"\[upgradable from: (\S+)\]", line)
         if version_match and current_match:
             new_ver = re.search(r":(\d+\.\d+\.\d+)", version_match.group(1))
@@ -1161,13 +1168,18 @@ def check_engine_update():
 
 def _local_arch():
     m = platform.machine()
-    return "amd64" if m == "x86_64" else m
+    if m == "x86_64":
+        return "amd64"
+    if m == "aarch64":
+        return "arm64"
+    return m
 
 
 def get_local_image_id(image):
     result = subprocess.run(
         ["docker", "image", "inspect", "--format", "{{.Id}}", image],
         capture_output=True, text=True,
+        timeout=DOCKER_CMD_TIMEOUT_SECONDS,
     )
     return result.stdout.strip() if result.returncode == 0 else None
 
@@ -1176,6 +1188,7 @@ def get_remote_config_digest(image):
     result = subprocess.run(
         ["docker", "manifest", "inspect", "--verbose", image],
         capture_output=True, text=True,
+        timeout=DOCKER_MANIFEST_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         return None
@@ -1227,6 +1240,7 @@ def run_update_check(icon):
 
 
 def poll_updates(icon):
+    run_update_check(icon)
     while getattr(icon, "_running", True):
         time.sleep(UPDATE_CHECK_INTERVAL_SECONDS)
         run_update_check(icon)
