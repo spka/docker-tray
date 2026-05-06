@@ -20,6 +20,15 @@ menu for quick checks and actions.
 
 ## Install
 
+For normal use, install the release package and run the packaged launcher:
+
+```bash
+sudo apt install ./docker-tray_0.1.0_all.deb
+docker-tray
+```
+
+The source checkout is only needed for development. To run from a cloned repo:
+
 ```bash
 sudo apt install python3-pystray python3-pil python3-gi gir1.2-gtk-3.0
 python3 docker_tray.py
@@ -27,13 +36,6 @@ python3 docker_tray.py
 
 Docker must already be installed, and your user must be able to run `docker`
 without a password.
-
-Release packages can be installed with:
-
-```bash
-sudo apt install ./docker-tray_0.1.0_all.deb
-docker-tray
-```
 
 ## Uninstall
 
