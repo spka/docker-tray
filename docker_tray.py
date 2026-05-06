@@ -3,6 +3,7 @@ import re
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 import gi
 
@@ -15,6 +16,8 @@ from PIL import Image, ImageDraw
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
+AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
+AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
 
 
 def make_icon():
@@ -85,6 +88,66 @@ def run_docker_action(action, name):
         args=(["docker", action, name],),
         daemon=True,
     ).start()
+
+
+def read_autostart_enabled():
+    try:
+        for line in AUTOSTART_DESKTOP_FILE.read_text().splitlines():
+            if line.startswith(AUTOSTART_ENABLED_PREFIX):
+                return line.split("=", 1)[1].strip().lower() == "true"
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+    return False
+
+
+def build_autostart_desktop(enabled):
+    script_path = Path(__file__).resolve()
+    return "\n".join([
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Docker Tray",
+        f"Exec=python3 {script_path}",
+        "Icon=docker",
+        "Comment=Docker container monitor in the system tray",
+        f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}",
+        "",
+    ])
+
+
+def write_autostart_enabled(enabled):
+    AUTOSTART_DESKTOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        lines = AUTOSTART_DESKTOP_FILE.read_text().splitlines()
+    except FileNotFoundError:
+        lines = build_autostart_desktop(enabled).splitlines()
+    except Exception:
+        return
+    else:
+        updated = False
+        for index, line in enumerate(lines):
+            if line.startswith(AUTOSTART_ENABLED_PREFIX):
+                lines[index] = f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}"
+                updated = True
+                break
+        if not updated:
+            lines.append(f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}")
+
+    AUTOSTART_DESKTOP_FILE.write_text("\n".join(lines).rstrip() + "\n")
+
+
+def toggle_start_at_boot(icon, item):
+    write_autostart_enabled(not read_autostart_enabled())
+    try:
+        icon.update_menu()
+    except Exception:
+        pass
+
+
+def get_start_at_boot_label(item):
+    return "Start at boot ✓" if read_autostart_enabled() else "Start at boot"
 
 
 def open_url(port):
@@ -171,6 +234,15 @@ def get_menu_items(pystray):
 
     items += [
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
+            "Settings",
+            pystray.Menu(
+                pystray.MenuItem(
+                    get_start_at_boot_label,
+                    toggle_start_at_boot,
+                ),
+            ),
+        ),
         pystray.MenuItem("Quit", lambda icon, item: icon.stop()),
     ]
     return items

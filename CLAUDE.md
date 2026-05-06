@@ -23,6 +23,8 @@ testing the tray menu against an already-running Flatpak Firefox instance.
   opening.
 - Python stdlib `subprocess` - Docker interaction through `docker ps` and
   `docker restart`.
+- `~/.config/autostart/docker-tray.desktop` - managed by the tray menu's
+  `Settings -> Start at boot` toggle.
 
 ## Install
 
@@ -193,6 +195,19 @@ every poll.
 Because the app passes a custom `setup` callback to `icon.run()`, that callback
 must set `icon.visible = True`. Without that line the process runs but the tray
 icon does not appear.
+
+### Start At Boot Toggle
+
+The tray menu has a `Settings` submenu with a `Start at boot` toggle. That
+toggle reads and writes the `X-GNOME-Autostart-enabled` value inside
+`~/.config/autostart/docker-tray.desktop`.
+
+When enabled, the menu label renders as `Start at boot ✓`. This keeps the state
+marker after the text instead of relying on the tray backend's native checkmark,
+which appears before the item text.
+
+If the desktop file is missing, the toggle recreates it with the current script
+path in the `Exec=` line and enables autostart.
 
 ## Troubleshooting
 
