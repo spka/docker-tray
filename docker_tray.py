@@ -1130,7 +1130,7 @@ def get_settings_items(pystray):
 def get_menu_items(pystray):
     items = []
     if update_check_state["engine_update"]:
-        items.append(pystray.MenuItem("⬆️ Docker engine update available", None, enabled=False))
+        items.append(pystray.MenuItem("⬆️ Docker update available", None, enabled=False))
     for image in update_check_state["image_updates"]:
         items.append(pystray.MenuItem(f"⬆️ {image} updated", None, enabled=False))
     if items:
