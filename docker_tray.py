@@ -1206,9 +1206,21 @@ def get_remote_config_digest(image):
     return data.get("SchemaV2Manifest", {}).get("config", {}).get("digest")
 
 
+def is_unpinned_image(image):
+    if "@" in image:
+        return False
+    tag = image.rsplit("/", 1)[-1]
+    if ":" not in tag:
+        return True
+    return tag.rsplit(":", 1)[1] == "latest"
+
+
 def check_image_updates():
     result = run_docker_capture(["docker", "ps", "-a", "--format", "{{.Image}}"], check=False)
-    images = sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
+    images = sorted({
+        line.strip() for line in result.stdout.splitlines()
+        if line.strip() and is_unpinned_image(line.strip())
+    })
     return [
         image for image in images
         if (local := get_local_image_id(image))
