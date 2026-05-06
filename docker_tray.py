@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -18,6 +19,7 @@ HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
+DOCKER_INSTALL_URL = "https://docs.docker.com/installation/ubuntulinux/"
 
 
 def make_icon():
@@ -44,6 +46,10 @@ def get_containers():
         check=True,
     )
     return parse_containers(result.stdout)
+
+
+def is_docker_installed():
+    return shutil.which("docker") is not None
 
 
 def get_container_snapshot():
@@ -150,15 +156,13 @@ def get_start_at_boot_label(item):
     return "Start at boot ✓" if read_autostart_enabled() else "Start at boot"
 
 
-def open_url(port):
-    url = f"http://localhost:{port}"
-
+def open_uri(uri):
     def _open():
         bridge = Gtk.Window()
         bridge.set_default_size(1, 1)
 
         def on_map(w):
-            Gtk.show_uri_on_window(w, url, 0)
+            Gtk.show_uri_on_window(w, uri, 0)
             GLib.timeout_add(500, lambda: w.destroy() or False)
 
         bridge.connect("map", on_map)
@@ -168,8 +172,20 @@ def open_url(port):
     GLib.idle_add(_open)
 
 
+def open_url(port):
+    open_uri(f"http://localhost:{port}")
+
+
+def open_docker_install():
+    open_uri(DOCKER_INSTALL_URL)
+
+
 def make_open_cb(port):
     return lambda icon, item: open_url(port)
+
+
+def make_install_docker_cb():
+    return lambda icon, item: open_docker_install()
 
 
 def make_start_cb(name):
@@ -206,31 +222,37 @@ def poll_menu(icon):
 
 def get_menu_items(pystray):
     items = []
-    try:
-        for name, running, port in sorted(get_containers(), key=container_sort_key):
-            sub = []
-            if running and port:
-                sub.append(pystray.MenuItem(
-                    "  Open in browser ↗",
-                    make_open_cb(port)
-                ))
-            if running:
-                sub += [
-                    pystray.MenuItem("  Restart ↻", make_restart_cb(name)),
-                    pystray.MenuItem("  Stop ✕", make_stop_cb(name)),
-                ]
-            else:
-                sub.append(pystray.MenuItem("  Start ▸", make_start_cb(name)))
+    if not is_docker_installed():
+        items += [
+            pystray.MenuItem("Docker is not installed", None, enabled=False),
+            pystray.MenuItem("Download Docker ↗", make_install_docker_cb()),
+        ]
+    else:
+        try:
+            for name, running, port in sorted(get_containers(), key=container_sort_key):
+                sub = []
+                if running and port:
+                    sub.append(pystray.MenuItem(
+                        "  Open in browser ↗",
+                        make_open_cb(port)
+                    ))
+                if running:
+                    sub += [
+                        pystray.MenuItem("  Restart ↻", make_restart_cb(name)),
+                        pystray.MenuItem("  Stop ✕", make_stop_cb(name)),
+                    ]
+                else:
+                    sub.append(pystray.MenuItem("  Start ▸", make_start_cb(name)))
 
-            status_marker = "• " if running else "◦ "
-            label = (
-                f"{status_marker}{name}  :{port}"
-                if port else
-                f"{status_marker}{name}"
-            )
-            items.append(pystray.MenuItem(label, pystray.Menu(*sub)))
-    except Exception as e:
-        items.append(pystray.MenuItem(f"Error: {type(e).__name__}: {e}", None))
+                status_marker = "• " if running else "◦ "
+                label = (
+                    f"{status_marker}{name}  :{port}"
+                    if port else
+                    f"{status_marker}{name}"
+                )
+                items.append(pystray.MenuItem(label, pystray.Menu(*sub)))
+        except Exception as e:
+            items.append(pystray.MenuItem(f"Error: {type(e).__name__}: {e}", None))
 
     items += [
         pystray.Menu.SEPARATOR,

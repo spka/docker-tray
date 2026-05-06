@@ -23,6 +23,8 @@ testing the tray menu against an already-running Flatpak Firefox instance.
   opening.
 - Python stdlib `subprocess` - Docker interaction through `docker ps` and
   `docker restart`.
+- Python stdlib `shutil` - checks whether the `docker` CLI exists before trying
+  to list containers.
 - `~/.config/autostart/docker-tray.desktop` - managed by the tray menu's
   `Settings -> Start at boot` toggle.
 
@@ -115,6 +117,23 @@ docker ps -a --format "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 This includes names, status, and ports so stopped containers can stay visible
 while running state changes.
+
+### Docker Install Check
+
+Before listing containers, the tray menu checks whether the `docker` executable
+is on `PATH`. If it is missing, the menu shows:
+
+- `Docker is not installed`
+- `Download Docker ↗`
+
+The download item opens Docker's official Ubuntu Engine install page:
+
+```text
+https://docs.docker.com/installation/ubuntulinux/
+```
+
+Keep this pointed at official Docker documentation. The app still handles Docker
+daemon or permission errors separately through the normal error menu item.
 
 ### URL Opening on Wayland
 
