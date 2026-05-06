@@ -26,6 +26,7 @@ HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
 COMPOSE_START_POLL_SECONDS = 2
 COMPOSE_START_POLL_ATTEMPTS = 30
+UPDATE_CHECK_INTERVAL_SECONDS = 3600
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
 DOCKER_INSTALL_URL = "https://docs.docker.com/engine/install/ubuntu/"
@@ -66,6 +67,10 @@ cleanup_dialog = {
     "window": None,
     "content": None,
     "spinner": None,
+}
+update_check_state = {
+    "engine_update": False,
+    "image_updates": [],
 }
 
 
@@ -1051,6 +1056,7 @@ def start_menu_polling(icon):
     icon.visible = True
     watch_theme(icon)
     threading.Thread(target=poll_menu, args=(icon,), daemon=True).start()
+    threading.Thread(target=poll_updates, args=(icon,), daemon=True).start()
 
 
 def poll_menu(icon):
@@ -1063,6 +1069,51 @@ def poll_menu(icon):
         last_snapshot = current_snapshot
 
         update_tray_menu(icon)
+
+
+def check_engine_update():
+    result = subprocess.run(
+        ["apt", "list", "--upgradable"],
+        capture_output=True, text=True,
+    )
+    return any("docker-ce" in line for line in result.stdout.splitlines())
+
+
+def check_image_updates():
+    result = run_docker_capture(["docker", "ps", "-a", "--format", "{{.Image}}"], check=False)
+    images = sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
+    updated = []
+    for image in images:
+        pull = subprocess.run(["docker", "pull", image], capture_output=True, text=True)
+        if "Downloaded newer image" in pull.stdout:
+            updated.append(image)
+    return updated
+
+
+def run_update_check(icon):
+    try:
+        engine_update = check_engine_update()
+    except Exception:
+        engine_update = update_check_state["engine_update"]
+    try:
+        image_updates = check_image_updates()
+    except Exception:
+        image_updates = update_check_state["image_updates"]
+
+    changed = (
+        engine_update != update_check_state["engine_update"]
+        or image_updates != update_check_state["image_updates"]
+    )
+    update_check_state["engine_update"] = engine_update
+    update_check_state["image_updates"] = image_updates
+    if changed:
+        update_tray_menu(icon)
+
+
+def poll_updates(icon):
+    while getattr(icon, "_running", True):
+        time.sleep(UPDATE_CHECK_INTERVAL_SECONDS)
+        run_update_check(icon)
 
 
 def get_settings_items(pystray):
@@ -1078,6 +1129,12 @@ def get_settings_items(pystray):
 
 def get_menu_items(pystray):
     items = []
+    if update_check_state["engine_update"]:
+        items.append(pystray.MenuItem("⬆️ Docker engine update available", None, enabled=False))
+    for image in update_check_state["image_updates"]:
+        items.append(pystray.MenuItem(f"⬆️ {image} updated", None, enabled=False))
+    if items:
+        items.append(pystray.Menu.SEPARATOR)
     if not is_docker_installed():
         items += [
             pystray.MenuItem("Docker is not installed", None, enabled=False),
