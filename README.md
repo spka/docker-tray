@@ -36,8 +36,7 @@ sudo apt install /tmp/docker-tray_0.1.3_all.deb
 rm /tmp/docker-tray_0.1.3_all.deb
 ```
 
-Docker Tray starts automatically on login after installing the package. You can
-turn autostart off from `Settings -> Start at boot` in the tray menu.
+Docker Tray starts automatically on login after installing the package.
 
 Docker must already be installed, and your user must be able to run `docker`
 without a password.
