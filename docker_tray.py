@@ -70,7 +70,12 @@ cleanup_dialog = {
 }
 update_check_state = {
     "engine_update": False,
+    "engine_detail": "",
     "image_updates": [],
+}
+updates_dialog = {
+    "window": None,
+    "content": None,
 }
 
 
@@ -1076,7 +1081,19 @@ def check_engine_update():
         ["apt", "list", "--upgradable"],
         capture_output=True, text=True,
     )
-    return any("docker-ce" in line for line in result.stdout.splitlines())
+    for line in result.stdout.splitlines():
+        if not line.startswith("docker-ce/"):
+            continue
+        detail = ""
+        version_match = re.search(r"\s(\S+)\s+amd64", line)
+        current_match = re.search(r"\[upgradable from: (\S+)\]", line)
+        if version_match and current_match:
+            new_ver = re.search(r":(\d+\.\d+\.\d+)", version_match.group(1))
+            old_ver = re.search(r":(\d+\.\d+\.\d+)", current_match.group(1))
+            if new_ver and old_ver:
+                detail = f"{old_ver.group(1)} → {new_ver.group(1)}"
+        return True, detail
+    return False, ""
 
 
 def check_image_updates():
@@ -1092,9 +1109,10 @@ def check_image_updates():
 
 def run_update_check(icon):
     try:
-        engine_update = check_engine_update()
+        engine_update, engine_detail = check_engine_update()
     except Exception:
         engine_update = update_check_state["engine_update"]
+        engine_detail = update_check_state["engine_detail"]
     try:
         image_updates = check_image_updates()
     except Exception:
@@ -1105,6 +1123,7 @@ def run_update_check(icon):
         or image_updates != update_check_state["image_updates"]
     )
     update_check_state["engine_update"] = engine_update
+    update_check_state["engine_detail"] = engine_detail
     update_check_state["image_updates"] = image_updates
     if changed:
         update_tray_menu(icon)
@@ -1114,6 +1133,89 @@ def poll_updates(icon):
     while getattr(icon, "_running", True):
         time.sleep(UPDATE_CHECK_INTERVAL_SECONDS)
         run_update_check(icon)
+
+
+def clear_updates_dialog():
+    updates_dialog["window"] = None
+    updates_dialog["content"] = None
+    return GLib.SOURCE_REMOVE
+
+
+def destroy_updates_dialog():
+    window = updates_dialog["window"]
+    if window is not None:
+        window.destroy()
+    clear_updates_dialog()
+    return GLib.SOURCE_REMOVE
+
+
+def ensure_updates_dialog():
+    if updates_dialog["window"] is not None:
+        updates_dialog["window"].present()
+        return updates_dialog["window"]
+    window = Gtk.Window(title="Docker Updates")
+    window.set_default_size(400, 200)
+    window.set_resizable(True)
+    window.set_keep_above(True)
+    window.set_skip_taskbar_hint(True)
+    window.set_position(Gtk.WindowPosition.CENTER)
+    window.connect("destroy", lambda w: clear_updates_dialog())
+    updates_dialog["window"] = window
+    return window
+
+
+def set_updates_dialog_content(content):
+    window = updates_dialog["window"]
+    old = updates_dialog["content"]
+    if window is None:
+        return
+    if old is not None:
+        window.remove(old)
+    updates_dialog["content"] = content
+    window.add(content)
+    window.show_all()
+    window.present()
+
+
+def show_updates_dialog():
+    ensure_updates_dialog()
+    box = make_dialog_box()
+
+    if update_check_state["engine_update"]:
+        engine_label = Gtk.Label(label="Docker CE update available")
+        engine_label.set_xalign(0)
+        box.pack_start(engine_label, False, False, 0)
+        if update_check_state["engine_detail"]:
+            detail = Gtk.Label(label=update_check_state["engine_detail"])
+            detail.set_xalign(0)
+            box.pack_start(detail, False, False, 0)
+        cmd = Gtk.Label(label="sudo apt upgrade docker-ce")
+        cmd.set_xalign(0)
+        cmd.set_selectable(True)
+        box.pack_start(cmd, False, False, 0)
+
+    if update_check_state["image_updates"]:
+        images_label = Gtk.Label(label="Images pulled:")
+        images_label.set_xalign(0)
+        box.pack_start(images_label, False, False, 0)
+        for image in update_check_state["image_updates"]:
+            row = Gtk.Label(label=f"  {image}")
+            row.set_xalign(0)
+            box.pack_start(row, False, False, 0)
+
+    close_button = Gtk.Button(label="Close")
+    close_button.connect("clicked", lambda b: destroy_updates_dialog())
+    close_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+    close_row.set_halign(Gtk.Align.END)
+    close_row.pack_start(close_button, False, False, 0)
+    add_bottom_button_row(box, close_row)
+
+    set_updates_dialog_content(box)
+    return GLib.SOURCE_REMOVE
+
+
+def open_updates_dialog(icon, item):
+    GLib.idle_add(show_updates_dialog)
 
 
 def get_settings_items(pystray):
@@ -1130,9 +1232,9 @@ def get_settings_items(pystray):
 def get_menu_items(pystray):
     items = []
     if update_check_state["engine_update"]:
-        items.append(pystray.MenuItem("⬆️ Docker update available", None, enabled=False))
+        items.append(pystray.MenuItem("⬆️ Docker update available", open_updates_dialog))
     for image in update_check_state["image_updates"]:
-        items.append(pystray.MenuItem(f"⬆️ {image} updated", None, enabled=False))
+        items.append(pystray.MenuItem(f"⬆️ {image} updated", open_updates_dialog))
     if items:
         items.append(pystray.Menu.SEPARATOR)
     if not is_docker_installed():
