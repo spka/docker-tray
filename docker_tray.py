@@ -28,7 +28,7 @@ COMPOSE_START_POLL_SECONDS = 2
 COMPOSE_START_POLL_ATTEMPTS = 30
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
-DOCKER_INSTALL_URL = "https://docs.docker.com/installation/ubuntulinux/"
+DOCKER_INSTALL_URL = "https://docs.docker.com/engine/install/ubuntu/"
 COMPOSE_FILE_NAMES = {
     "compose.yml",
     "compose.yaml",
@@ -263,7 +263,7 @@ def compose_file_label(compose_file):
     except ValueError:
         return str(compose_file)
 
-    if compose_file.name in {"compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml"}:
+    if compose_file.name in COMPOSE_FILE_NAMES:
         return str(rel.parent) if str(rel.parent) != "." else compose_file.name
     return str(rel)
 
@@ -273,10 +273,6 @@ def update_tray_menu(icon):
         icon.update_menu()
     except Exception:
         pass
-
-
-def count_output_lines(output):
-    return len([line for line in output.splitlines() if line.strip()])
 
 
 def count_unique_output_lines(output):
@@ -941,8 +937,6 @@ def read_autostart_enabled():
         for line in AUTOSTART_DESKTOP_FILE.read_text().splitlines():
             if line.startswith(AUTOSTART_ENABLED_PREFIX):
                 return line.split("=", 1)[1].strip().lower() == "true"
-    except FileNotFoundError:
-        return False
     except Exception:
         return False
     return False
@@ -954,7 +948,7 @@ def build_autostart_desktop(enabled):
         "[Desktop Entry]",
         "Type=Application",
         "Name=Docker Tray",
-        f"Exec=python3 {script_path}",
+        f'Exec=python3 "{script_path}"',
         "Icon=docker",
         "Comment=Docker container monitor in the system tray",
         f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}",
