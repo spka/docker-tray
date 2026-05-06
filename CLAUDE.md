@@ -219,6 +219,25 @@ Verify the app is running:
 pgrep -af docker_tray.py
 ```
 
+When working from a sandboxed agent session, regular `pgrep` can miss host
+desktop processes or show only sandbox wrapper commands. Check the host process
+table explicitly:
+
+```bash
+ps -eo pid=,ppid=,user=,cmd= | rg '[d]ocker_tray\.py'
+```
+
+If duplicate tray icons were started from the sandbox, kill the specific host
+PIDs and start one clean copy in the desktop session:
+
+```bash
+kill <pid> <pid> ...
+setsid env DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+  python3 /home/stephan/development/docker-tray/docker_tray.py \
+  >/tmp/docker-tray.log 2>&1 < /dev/null &
+```
+
 Verify required packages are installed:
 
 ```bash
