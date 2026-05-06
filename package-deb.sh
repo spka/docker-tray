@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.1.2}"
+version="${1:-0.1.3}"
 package="docker-tray"
 root="dist/${package}_${version}_all"
 
@@ -12,7 +12,8 @@ mkdir -p \
   "$root/usr/bin" \
   "$root/usr/share/applications" \
   "$root/usr/share/docker-tray" \
-  "$root/usr/share/doc/docker-tray"
+  "$root/usr/share/doc/docker-tray" \
+  "$root/usr/share/icons/hicolor/256x256/apps"
 
 cat > "$root/DEBIAN/control" <<CONTROL
 Package: docker-tray
@@ -30,6 +31,7 @@ CONTROL
 
 install -m 0755 docker_tray.py "$root/usr/bin/docker-tray"
 install -m 0644 icon-dark.png icon-light.png "$root/usr/share/docker-tray/"
+install -m 0644 icon-light.png "$root/usr/share/icons/hicolor/256x256/apps/docker-tray.png"
 install -m 0644 README.md "$root/usr/share/doc/docker-tray/README.md"
 install -m 0644 LICENSE "$root/usr/share/doc/docker-tray/copyright"
 
@@ -38,7 +40,7 @@ cat > "$root/usr/share/applications/docker-tray.desktop" <<DESKTOP
 Type=Application
 Name=Docker Tray
 Exec=docker-tray
-Icon=docker
+Icon=docker-tray
 Comment=Docker container monitor in the system tray
 Categories=Utility;
 Terminal=false
@@ -50,7 +52,7 @@ cat > "$root/etc/xdg/autostart/docker-tray.desktop" <<DESKTOP
 Type=Application
 Name=Docker Tray
 Exec=docker-tray
-Icon=docker
+Icon=docker-tray
 Comment=Docker container monitor in the system tray
 Categories=Utility;
 Terminal=false

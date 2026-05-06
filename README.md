@@ -23,9 +23,9 @@ menu for quick checks and actions.
 For normal use, install the release package and run the packaged launcher:
 
 ```bash
-curl -L -o /tmp/docker-tray_0.1.2_all.deb https://github.com/spka/docker-tray/releases/download/v0.1.2/docker-tray_0.1.2_all.deb
-sudo apt install /tmp/docker-tray_0.1.2_all.deb
-rm /tmp/docker-tray_0.1.2_all.deb
+curl -L -o /tmp/docker-tray_0.1.3_all.deb https://github.com/spka/docker-tray/releases/download/v0.1.3/docker-tray_0.1.3_all.deb
+sudo apt install /tmp/docker-tray_0.1.3_all.deb
+rm /tmp/docker-tray_0.1.3_all.deb
 ```
 
 Docker Tray starts automatically on login after installing the package. To start
