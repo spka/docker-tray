@@ -270,6 +270,35 @@ If Docker is not available or the user cannot read Docker state, the scan still
 lists the compose files and treats their running state as unknown, which means
 they get a `Run` button.
 
+### Docker Cleanup Check
+
+The tray menu has `Settings -> Docker cleanup`. It opens a GTK popup and checks
+for conservative cleanup candidates:
+
+- stopped or created containers
+- dangling images that are not referenced by any container
+- unused networks
+- reclaimable build cache
+
+If nothing is found, the popup says `Everything is fine`. If cleanup candidates
+are found, it lists them and shows a `Cleanup` button.
+
+The cleanup action runs these conservative prunes separately:
+
+```bash
+docker container prune -f
+docker image prune -f
+docker network prune -f
+docker builder prune -f
+```
+
+The popup shows command output after cleanup, which is important when Docker
+refuses to remove something. Docker can show images as dangling even while a
+container still uses their image ID; those images are intentionally excluded
+from the popup because `docker image prune` cannot remove them yet. Do not add
+`--volumes` casually. Volumes can hold persistent app data and are intentionally
+not removed by this cleanup button.
+
 ## Troubleshooting
 
 ### Tray Icon Does Not Appear

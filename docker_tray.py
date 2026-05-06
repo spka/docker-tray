@@ -62,6 +62,11 @@ compose_scan_loader = {
     "content": None,
     "search_root": Path.home(),
 }
+cleanup_dialog = {
+    "window": None,
+    "content": None,
+    "spinner": None,
+}
 
 
 def make_icon():
@@ -144,6 +149,15 @@ def run_compose_up(compose_file):
         args=(["docker", "compose", "-f", str(compose_file), "up", "-d"],),
         daemon=True,
     ).start()
+
+
+def run_docker_capture(args, check=True):
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        check=check,
+    )
 
 
 def should_skip_compose_scan_dir(root, dirname):
@@ -261,6 +275,335 @@ def update_tray_menu(icon):
         pass
 
 
+def count_output_lines(output):
+    return len([line for line in output.splitlines() if line.strip()])
+
+
+def count_unique_output_lines(output):
+    return len({line.strip() for line in output.splitlines() if line.strip()})
+
+
+def output_line_set(output):
+    return {line.strip() for line in output.splitlines() if line.strip()}
+
+
+def get_container_image_ids():
+    container_result = run_docker_capture([
+        "docker",
+        "ps",
+        "-a",
+        "-q",
+    ])
+    container_ids = sorted(output_line_set(container_result.stdout))
+    if not container_ids:
+        return set()
+
+    result = run_docker_capture([
+        "docker",
+        "inspect",
+        "--format",
+        "{{.Image}}",
+        *container_ids,
+    ])
+    return output_line_set(result.stdout)
+
+
+def get_removable_dangling_image_count():
+    dangling_result = run_docker_capture([
+        "docker",
+        "images",
+        "--filter",
+        "dangling=true",
+        "--no-trunc",
+        "-q",
+    ])
+    dangling_images = output_line_set(dangling_result.stdout)
+    container_images = get_container_image_ids()
+    return len(dangling_images - container_images)
+
+
+def get_docker_cleanup_report():
+    stopped_result = run_docker_capture([
+        "docker",
+        "ps",
+        "-a",
+        "--filter",
+        "status=exited",
+        "--filter",
+        "status=created",
+        "-q",
+    ])
+    unused_networks_result = run_docker_capture([
+        "docker",
+        "network",
+        "ls",
+        "--filter",
+        "dangling=true",
+        "-q",
+    ])
+
+    report = [
+        ("Stopped containers", count_unique_output_lines(stopped_result.stdout), None),
+        ("Dangling images", get_removable_dangling_image_count(), None),
+        ("Unused networks", count_unique_output_lines(unused_networks_result.stdout), None),
+    ]
+
+    try:
+        df_result = run_docker_capture([
+            "docker",
+            "system",
+            "df",
+            "--format",
+            "{{.Type}}\t{{.Reclaimable}}",
+        ])
+        for line in df_result.stdout.splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) != 2 or parts[0] != "Build Cache":
+                continue
+            reclaimable = parts[1].strip()
+            if not reclaimable.startswith("0B"):
+                report.append(("Build cache", 1, reclaimable))
+            break
+    except Exception:
+        pass
+
+    return report
+
+
+def cleanup_report_has_work(report):
+    return any(count > 0 for _label, count, _detail in report)
+
+
+def run_docker_cleanup():
+    commands = [
+        ["docker", "container", "prune", "-f"],
+        ["docker", "image", "prune", "-f"],
+        ["docker", "network", "prune", "-f"],
+        ["docker", "builder", "prune", "-f"],
+    ]
+    output = []
+    for command in commands:
+        result = run_docker_capture(command)
+        command_text = " ".join(command)
+        combined_output = "\n".join(
+            text.strip()
+            for text in (result.stdout, result.stderr)
+            if text.strip()
+        )
+        if combined_output:
+            output.append(f"$ {command_text}\n{combined_output}")
+        else:
+            output.append(f"$ {command_text}\nDone")
+    return "\n\n".join(output)
+
+
+def clear_cleanup_dialog():
+    cleanup_dialog["window"] = None
+    cleanup_dialog["content"] = None
+    cleanup_dialog["spinner"] = None
+    return GLib.SOURCE_REMOVE
+
+
+def destroy_cleanup_dialog():
+    window = cleanup_dialog["window"]
+    if window is not None:
+        window.destroy()
+    clear_cleanup_dialog()
+    return GLib.SOURCE_REMOVE
+
+
+def ensure_cleanup_dialog():
+    if cleanup_dialog["window"] is not None:
+        cleanup_dialog["window"].present()
+        return cleanup_dialog["window"]
+
+    window = Gtk.Window(title="Docker Cleanup")
+    window.set_default_size(520, 300)
+    window.set_resizable(True)
+    window.set_keep_above(True)
+    window.set_skip_taskbar_hint(True)
+    window.set_position(Gtk.WindowPosition.CENTER)
+    window.connect("destroy", lambda w: clear_cleanup_dialog())
+
+    cleanup_dialog["window"] = window
+    return window
+
+
+def set_cleanup_dialog_content(content):
+    window = cleanup_dialog["window"]
+    old_content = cleanup_dialog["content"]
+    if window is None:
+        return
+    if old_content is not None:
+        window.remove(old_content)
+    cleanup_dialog["content"] = content
+    window.add(content)
+    window.show_all()
+    window.present()
+
+
+def show_cleanup_progress(message):
+    ensure_cleanup_dialog()
+
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+    box.set_border_width(16)
+
+    spinner = Gtk.Spinner()
+    spinner.start()
+    label = Gtk.Label(label=message)
+    label.set_xalign(0)
+
+    box.pack_start(spinner, False, False, 0)
+    box.pack_start(label, True, True, 0)
+
+    cleanup_dialog["spinner"] = spinner
+    set_cleanup_dialog_content(box)
+    return GLib.SOURCE_REMOVE
+
+
+def make_cleanup_report_row(label, count, detail):
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
+    name = Gtk.Label(label=label)
+    name.set_xalign(0)
+    name.set_hexpand(True)
+
+    if detail:
+        value_text = detail
+    else:
+        value_text = str(count)
+    value = Gtk.Label(label=value_text)
+    value.set_xalign(1)
+
+    row.pack_start(name, True, True, 0)
+    row.pack_start(value, False, False, 0)
+    return row
+
+
+def add_cleanup_output(box, cleanup_output):
+    if not cleanup_output:
+        return
+
+    label = Gtk.Label(label="Cleanup output")
+    label.set_xalign(0)
+    box.pack_start(label, False, False, 0)
+
+    scroller = Gtk.ScrolledWindow()
+    scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    scroller.set_min_content_height(120)
+
+    output_label = Gtk.Label(label=cleanup_output)
+    output_label.set_xalign(0)
+    output_label.set_yalign(0)
+    output_label.set_selectable(True)
+    output_label.set_line_wrap(True)
+
+    scroller.add(output_label)
+    box.pack_start(scroller, True, True, 0)
+
+
+def show_cleanup_results(icon, report=None, error=None, cleaned=False, cleanup_output=None):
+    ensure_cleanup_dialog()
+
+    spinner = cleanup_dialog["spinner"]
+    if spinner is not None:
+        spinner.stop()
+    cleanup_dialog["spinner"] = None
+
+    box = make_dialog_box()
+
+    if error:
+        title = Gtk.Label(label=f"Docker cleanup check failed: {error}")
+        title.set_xalign(0)
+        title.set_line_wrap(True)
+        box.pack_start(title, False, False, 0)
+    elif not cleanup_report_has_work(report):
+        title_text = "Everything is fine"
+        if cleaned:
+            title_text = "Cleanup finished. Everything is fine"
+        title = Gtk.Label(label=title_text)
+        title.set_xalign(0)
+        box.pack_start(title, False, False, 0)
+        add_cleanup_output(box, cleanup_output)
+    else:
+        title_text = "Docker cleanup opportunities"
+        if cleaned:
+            title_text = "Some Docker cleanup candidates remain"
+        title = Gtk.Label(label=title_text)
+        title.set_xalign(0)
+        box.pack_start(title, False, False, 0)
+
+        for label, count, detail in report:
+            if count > 0:
+                box.pack_start(make_cleanup_report_row(label, count, detail), False, False, 0)
+
+        note = Gtk.Label(
+            label=(
+                "Cleanup prunes stopped containers, dangling images, unused "
+                "networks, and builder cache. Volumes are not removed."
+            )
+        )
+        note.set_xalign(0)
+        note.set_line_wrap(True)
+        box.pack_start(note, False, False, 0)
+        add_cleanup_output(box, cleanup_output)
+
+    buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    buttons.set_halign(Gtk.Align.END)
+
+    close_button = Gtk.Button(label="Close")
+    close_button.connect("clicked", lambda button: destroy_cleanup_dialog())
+    buttons.pack_start(close_button, False, False, 0)
+
+    if not error and cleanup_report_has_work(report):
+        cleanup_button = Gtk.Button(label="Cleanup")
+        cleanup_button.connect("clicked", lambda button: start_docker_cleanup(icon))
+        buttons.pack_start(cleanup_button, False, False, 0)
+
+    add_bottom_button_row(box, buttons)
+    set_cleanup_dialog_content(box)
+    return GLib.SOURCE_REMOVE
+
+
+def start_docker_cleanup_check(icon, cleaned=False, cleanup_output=None):
+    GLib.idle_add(show_cleanup_progress, "Checking Docker cleanup state...")
+
+    def _check():
+        try:
+            report = get_docker_cleanup_report()
+            error = None
+        except Exception as e:
+            report = []
+            error = f"{type(e).__name__}: {e}"
+
+        update_tray_menu(icon)
+        GLib.idle_add(show_cleanup_results, icon, report, error, cleaned, cleanup_output)
+
+    threading.Thread(target=_check, daemon=True).start()
+
+
+def start_docker_cleanup(icon):
+    GLib.idle_add(show_cleanup_progress, "Cleaning Docker...")
+
+    def _cleanup():
+        try:
+            cleanup_output = run_docker_cleanup()
+        except Exception as e:
+            GLib.idle_add(show_cleanup_results, icon, [], f"{type(e).__name__}: {e}", False, None)
+            return
+
+        update_tray_menu(icon)
+        start_docker_cleanup_check(icon, cleaned=True, cleanup_output=cleanup_output)
+
+    threading.Thread(target=_cleanup, daemon=True).start()
+
+
+def open_cleanup_dialog(icon):
+    ensure_cleanup_dialog()
+    start_docker_cleanup_check(icon)
+    return GLib.SOURCE_REMOVE
+
+
 def clear_compose_scan_window():
     compose_scan_loader["window"] = None
     compose_scan_loader["spinner"] = None
@@ -311,6 +654,13 @@ def make_dialog_box():
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
     box.set_border_width(16)
     return box
+
+
+def add_bottom_button_row(box, buttons):
+    spacer = Gtk.Box()
+    spacer.set_vexpand(True)
+    box.pack_start(spacer, True, True, 0)
+    box.pack_start(buttons, False, False, 0)
 
 
 def get_compose_scan_locations():
@@ -392,7 +742,7 @@ def open_compose_scan_dialog(icon):
     box.pack_start(location_label, False, False, 0)
     box.pack_start(location, False, False, 0)
     box.pack_start(detail, False, False, 0)
-    box.pack_start(buttons, False, False, 0)
+    add_bottom_button_row(box, buttons)
     set_compose_scan_content(box)
     return GLib.SOURCE_REMOVE
 
@@ -498,7 +848,7 @@ def show_compose_scan_results(icon, results, error):
         close_row.set_halign(Gtk.Align.END)
         close_row.pack_start(close_button, False, False, 0)
         box.pack_start(message, False, False, 0)
-        box.pack_start(close_row, False, False, 0)
+        add_bottom_button_row(box, close_row)
         set_compose_scan_content(box)
         return GLib.SOURCE_REMOVE
 
@@ -548,7 +898,7 @@ def show_compose_scan_results(icon, results, error):
     close_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
     close_row.set_halign(Gtk.Align.END)
     close_row.pack_start(close_button, False, False, 0)
-    box.pack_start(close_row, False, False, 0)
+    add_bottom_button_row(box, close_row)
 
     set_compose_scan_content(box)
     return GLib.SOURCE_REMOVE
@@ -679,6 +1029,10 @@ def make_compose_search_cb():
     return lambda icon, item: GLib.idle_add(open_compose_scan_dialog, icon)
 
 
+def make_cleanup_cb():
+    return lambda icon, item: GLib.idle_add(open_cleanup_dialog, icon)
+
+
 def make_start_cb(name):
     return lambda icon, item: run_docker_action("start", name)
 
@@ -711,6 +1065,7 @@ def poll_menu(icon):
 def get_settings_items(pystray):
     return [
         pystray.MenuItem("Search compose files", make_compose_search_cb()),
+        pystray.MenuItem("Docker cleanup", make_cleanup_cb()),
         pystray.MenuItem(
             get_start_at_boot_label,
             toggle_start_at_boot,
