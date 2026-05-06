@@ -23,8 +23,16 @@ menu for quick checks and actions.
 For normal use, install the release package and run the packaged launcher:
 
 ```bash
+# Download the release package to /tmp.
 curl -L -o /tmp/docker-tray_0.1.3_all.deb https://github.com/spka/docker-tray/releases/download/v0.1.3/docker-tray_0.1.3_all.deb
+
+# Make the file readable by apt's sandbox user.
+chmod 0644 /tmp/docker-tray_0.1.3_all.deb
+
+# Install or upgrade Docker Tray.
 sudo apt install /tmp/docker-tray_0.1.3_all.deb
+
+# Remove the temporary package file.
 rm /tmp/docker-tray_0.1.3_all.deb
 ```
 
