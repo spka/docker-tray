@@ -35,6 +35,13 @@ sudo apt install ./docker-tray_0.1.0_all.deb
 docker-tray
 ```
 
+## Uninstall
+
+```bash
+sudo apt remove docker-tray
+rm -f ~/.config/autostart/docker-tray.desktop
+```
+
 ## License
 
 MIT
