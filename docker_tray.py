@@ -1080,16 +1080,16 @@ def get_menu_items(pystray):
                 sub = []
                 if running and port:
                     sub.append(pystray.MenuItem(
-                        "Open ↗",
+                        "🔗 Open",
                         make_open_cb(port)
                     ))
                 if running:
                     sub += [
-                        pystray.MenuItem("Restart ↻", make_restart_cb(name)),
-                        pystray.MenuItem("Stop ✕", make_stop_cb(name)),
+                        pystray.MenuItem("🔄 Restart", make_restart_cb(name)),
+                        pystray.MenuItem("⏹️ Stop", make_stop_cb(name)),
                     ]
                 else:
-                    sub.append(pystray.MenuItem("Start ▸", make_start_cb(name)))
+                    sub.append(pystray.MenuItem("▶️ Start", make_start_cb(name)))
 
                 status_marker = "• " if running else "◦ "
                 label = (
