@@ -1300,7 +1300,29 @@ def set_updates_dialog_content(content):
     window.present()
 
 
-def show_updates_dialog():
+def start_docker_engine_upgrade(button, icon):
+    button.set_label("Upgrading...")
+    button.set_sensitive(False)
+
+    def _upgrade():
+        result = subprocess.run(
+            ["pkexec", "apt-get", "install", "-y", "--only-upgrade", "docker-ce"],
+            capture_output=True, text=True,
+        )
+        def _done():
+            if result.returncode == 0:
+                button.set_label("Done!")
+                threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
+            else:
+                button.set_label("Failed — check terminal")
+                button.set_sensitive(True)
+            return GLib.SOURCE_REMOVE
+        GLib.idle_add(_done)
+
+    threading.Thread(target=_upgrade, daemon=True).start()
+
+
+def show_updates_dialog(icon):
     ensure_updates_dialog()
     box = make_dialog_box()
 
@@ -1312,10 +1334,9 @@ def show_updates_dialog():
             detail = Gtk.Label(label=update_check_state["engine_detail"])
             detail.set_xalign(0)
             box.pack_start(detail, False, False, 0)
-        cmd = Gtk.Label(label="sudo apt upgrade docker-ce")
-        cmd.set_xalign(0)
-        cmd.set_selectable(True)
-        box.pack_start(cmd, False, False, 0)
+        upgrade_button = Gtk.Button(label="Upgrade Docker CE")
+        upgrade_button.connect("clicked", lambda b: start_docker_engine_upgrade(upgrade_button, icon))
+        box.pack_start(upgrade_button, False, False, 0)
 
     if update_check_state["image_updates"]:
         images_label = Gtk.Label(label="Image updates available:")
@@ -1338,7 +1359,7 @@ def show_updates_dialog():
 
 
 def open_updates_dialog(icon, item):
-    GLib.idle_add(show_updates_dialog)
+    GLib.idle_add(show_updates_dialog, icon)
 
 
 def get_settings_items(pystray):
