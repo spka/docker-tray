@@ -92,6 +92,9 @@ container_stats_dialog = {
     "window": None,
     "content": None,
 }
+container_health_state = {
+    "level": "ok",
+}
 
 
 ICON_NAMES = ("icon-dark.png", "icon-light.png")
@@ -1355,12 +1358,17 @@ def compute_health(summary, system_mem_total):
     return level, total_cpu, total_mem, system_mem_total, mem_pct, issues
 
 
-def poll_container_stats():
+def poll_container_stats(icon):
     while True:
         try:
             samples = collect_stats_sample()
             if samples:
                 append_stats_to_file(samples)
+                summary, system_mem_total = build_stats_summary()
+                level, *_ = compute_health(summary, system_mem_total)
+                if level != container_health_state["level"]:
+                    container_health_state["level"] = level
+                    update_tray_menu(icon)
         except Exception:
             pass
         time.sleep(STATS_POLL_INTERVAL_SECONDS)
@@ -1589,7 +1597,7 @@ def start_menu_polling(icon):
     watch_theme(icon)
     threading.Thread(target=poll_menu, args=(icon,), daemon=True).start()
     threading.Thread(target=poll_updates, args=(icon,), daemon=True).start()
-    threading.Thread(target=poll_container_stats, daemon=True).start()
+    threading.Thread(target=poll_container_stats, args=(icon,), daemon=True).start()
 
 
 def poll_menu(icon):
@@ -1836,6 +1844,10 @@ def get_settings_items(pystray):
 
 def get_menu_items(pystray):
     items = []
+    if container_health_state["level"] == "critical":
+        items.append(pystray.MenuItem("🔴 Container issue detected", open_container_stats_dialog))
+    elif container_health_state["level"] == "warning":
+        items.append(pystray.MenuItem("🟡 Container warning", open_container_stats_dialog))
     if update_check_state["engine_update"]:
         items.append(pystray.MenuItem("⬆️ Docker update available", open_updates_dialog))
     for image in update_check_state["image_updates"]:
