@@ -1499,10 +1499,6 @@ def show_container_stats(summary, system_mem_total, error):
         sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         box.pack_start(sep, False, False, 4)
 
-        header = Gtk.Label()
-        header.set_markup("<b>all-time peaks</b>")
-        header.set_xalign(0)
-        box.pack_start(header, False, False, 0)
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
