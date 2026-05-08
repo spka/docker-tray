@@ -1300,8 +1300,51 @@ def build_stats_summary():
             "peak_mem_ts": p.get("mem_ts", 0),
         })
 
+    system_mem_total = 0
+    for s in current_samples:
+        if "/" in s["mem_str"]:
+            total_part = s["mem_str"].split("/")[1].strip()
+            parsed = parse_mem_bytes(total_part)
+            if parsed > system_mem_total:
+                system_mem_total = parsed
+
     summary.sort(key=lambda x: x["name"].lower())
-    return summary
+    return summary, system_mem_total
+
+
+def compute_health(summary, system_mem_total):
+    issues = []
+    level = "ok"
+
+    total_cpu = sum(s["cpu"] for s in summary)
+    total_mem = sum(s["mem"] for s in summary)
+    mem_pct = (total_mem / system_mem_total * 100) if system_mem_total else 0
+
+    peak_mem_total = sum(s["peak_mem"] for s in summary)
+    peak_mem_pct = (peak_mem_total / system_mem_total * 100) if system_mem_total else 0
+
+    for s in summary:
+        if s["restarts"] > 0:
+            level = "critical"
+            issues.append(f"⚠ {s['name']}: {s['restarts']} restart(s)")
+        if s["peak_cpu"] >= 80:
+            level = "critical"
+            ts = f" at {format_ts(s['peak_cpu_ts'])}" if s["peak_cpu_ts"] else ""
+            issues.append(f"⚠ {s['name']}: peak CPU {s['peak_cpu']:.1f}%{ts}")
+        elif s["peak_cpu"] >= 60 and level == "ok":
+            level = "warning"
+            ts = f" at {format_ts(s['peak_cpu_ts'])}" if s["peak_cpu_ts"] else ""
+            issues.append(f"↑ {s['name']}: peak CPU {s['peak_cpu']:.1f}%{ts}")
+
+    if peak_mem_pct >= 85:
+        if level != "critical":
+            level = "critical"
+        issues.append(f"⚠ Peak RAM: {format_bytes(peak_mem_total)} / {format_bytes(system_mem_total)} ({peak_mem_pct:.0f}%)")
+    elif peak_mem_pct >= 70 and level == "ok":
+        level = "warning"
+        issues.append(f"↑ Peak RAM: {format_bytes(peak_mem_total)} / {format_bytes(system_mem_total)} ({peak_mem_pct:.0f}%)")
+
+    return level, total_cpu, total_mem, system_mem_total, mem_pct, issues
 
 
 def poll_container_stats():
@@ -1393,7 +1436,7 @@ def make_stats_cell(text, xalign=1, warning=False, dim=False):
     return label
 
 
-def show_container_stats(summary, error):
+def show_container_stats(summary, system_mem_total, error):
     ensure_container_stats_dialog()
     box = make_dialog_box()
 
@@ -1407,8 +1450,38 @@ def show_container_stats(summary, error):
         label.set_xalign(0)
         box.pack_start(label, False, False, 0)
     else:
+        level, total_cpu, total_mem, sys_mem, mem_pct, issues = compute_health(summary, system_mem_total)
+
+        badge = {"ok": "🟢 Healthy", "warning": "🟡 Watch", "critical": "🔴 Action needed"}[level]
+        color = {"ok": "green", "warning": "orange", "critical": "red"}[level]
+
+        health_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        badge_label = Gtk.Label()
+        badge_label.set_markup(f"<b><span foreground='{color}'>{badge}</span></b>")
+        badge_label.set_xalign(0)
+        health_row.pack_start(badge_label, False, False, 0)
+
+        totals_label = Gtk.Label(label=(
+            f"{len(summary)} containers  ·  "
+            f"CPU total: {total_cpu:.1f}%  ·  "
+            f"RAM: {format_bytes(total_mem)} / {format_bytes(sys_mem)} ({mem_pct:.0f}%)"
+        ))
+        totals_label.set_xalign(0)
+        totals_label.get_style_context().add_class("dim-label")
+        health_row.pack_start(totals_label, True, True, 0)
+        box.pack_start(health_row, False, False, 0)
+
+        if issues:
+            for issue in issues:
+                issue_label = Gtk.Label(label=issue)
+                issue_label.set_xalign(0)
+                box.pack_start(issue_label, False, False, 0)
+
+        sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        box.pack_start(sep, False, False, 4)
+
         header = Gtk.Label()
-        header.set_markup(f"<b>{len(summary)} containers  ·  peaks from last {STATS_HISTORY_HOURS}h</b>")
+        header.set_markup(f"<b>peaks from last {STATS_HISTORY_HOURS}h</b>")
         header.set_xalign(0)
         box.pack_start(header, False, False, 0)
 
@@ -1481,12 +1554,12 @@ def start_container_stats_load():
 
     def _load():
         try:
-            summary = build_stats_summary()
+            summary, system_mem_total = build_stats_summary()
             error = None
         except Exception as e:
-            summary = []
+            summary, system_mem_total = [], 0
             error = f"{type(e).__name__}: {e}"
-        GLib.idle_add(show_container_stats, summary, error)
+        GLib.idle_add(show_container_stats, summary, system_mem_total, error)
 
     threading.Thread(target=_load, daemon=True).start()
 
