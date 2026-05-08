@@ -36,6 +36,10 @@ AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.de
 SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
 DOCKER_INSTALL_URL = "https://docs.docker.com/engine/install/ubuntu/"
+STATS_POLL_INTERVAL_SECONDS = 300
+STATS_HISTORY_HOURS = 48
+STATS_FILE = Path.home() / ".local" / "share" / "docker-tray" / "stats.jsonl"
+STATS_CPU_SPIKE_PCT = 80.0
 COMPOSE_FILE_NAMES = {
     "compose.yml",
     "compose.yaml",
@@ -80,6 +84,10 @@ update_check_state = {
     "image_updates": [],
 }
 updates_dialog = {
+    "window": None,
+    "content": None,
+}
+container_stats_dialog = {
     "window": None,
     "content": None,
 }
@@ -1125,11 +1133,375 @@ def make_stop_cb(name):
     return lambda icon, item: run_docker_action("stop", name)
 
 
+def parse_cpu_pct(s):
+    try:
+        return float(s.strip().rstrip("%"))
+    except Exception:
+        return 0.0
+
+
+def parse_mem_bytes(s):
+    match = re.match(r"([\d.]+)\s*(B|kB|KiB|MB|MiB|GB|GiB)", s.strip())
+    if not match:
+        return 0
+    value = float(match.group(1))
+    unit = match.group(2)
+    multipliers = {"B": 1, "kB": 1000, "KiB": 1024, "MB": 1_000_000,
+                   "MiB": 1024**2, "GB": 1_000_000_000, "GiB": 1024**3}
+    return int(value * multipliers.get(unit, 1))
+
+
+def format_bytes(n):
+    for unit, threshold in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if n >= threshold:
+            return f"{n / threshold:.1f} {unit}"
+    return f"{n} B"
+
+
+def format_uptime(seconds):
+    seconds = int(seconds)
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes = seconds // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def format_ts(ts):
+    import datetime
+    dt = datetime.datetime.fromtimestamp(ts)
+    if dt.date() == datetime.date.today():
+        return dt.strftime("%H:%M")
+    return dt.strftime("%d %b %H:%M")
+
+
+def collect_stats_sample():
+    result = run_docker_capture(
+        ["docker", "stats", "--no-stream", "--format",
+         "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"],
+        check=False,
+    )
+    ts = time.time()
+    samples = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        name, cpu_str, mem_str = parts
+        mem_used = mem_str.split("/")[0].strip() if "/" in mem_str else mem_str.strip()
+        samples.append({
+            "t": ts,
+            "name": name.strip(),
+            "cpu": parse_cpu_pct(cpu_str),
+            "mem": parse_mem_bytes(mem_used),
+            "mem_str": mem_str.strip(),
+        })
+    return samples
+
+
+def append_stats_to_file(samples):
+    STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with STATS_FILE.open("a") as f:
+        for s in samples:
+            f.write(json.dumps(s) + "\n")
+
+
+def prune_stats_file():
+    if not STATS_FILE.exists():
+        return
+    cutoff = time.time() - STATS_HISTORY_HOURS * 3600
+    lines = STATS_FILE.read_text().splitlines()
+    kept = [l for l in lines if l.strip() and json.loads(l).get("t", 0) >= cutoff]
+    STATS_FILE.write_text("\n".join(kept) + ("\n" if kept else ""))
+
+
+def load_stats_history():
+    if not STATS_FILE.exists():
+        return []
+    entries = []
+    for line in STATS_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+    return entries
+
+
+def get_container_restart_counts():
+    result = run_docker_capture(
+        ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
+        check=False,
+    )
+    counts = {}
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        name, status = parts
+        match = re.search(r"Restarting|(\d+) restart", status)
+        if match and match.group(1):
+            counts[name.strip()] = int(match.group(1))
+        else:
+            counts[name.strip()] = 0
+    return counts
+
+
+def get_container_uptimes():
+    result = run_docker_capture(
+        ["docker", "ps", "--format", "{{.Names}}\t{{.RunningFor}}"],
+        check=False,
+    )
+    uptimes = {}
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            uptimes[parts[0].strip()] = parts[1].strip()
+    return uptimes
+
+
+def build_stats_summary():
+    history = load_stats_history()
+    current_samples = collect_stats_sample()
+    restarts = get_container_restart_counts()
+    uptimes = get_container_uptimes()
+
+    peaks = {}
+    for entry in history:
+        name = entry["name"]
+        if name not in peaks:
+            peaks[name] = {"cpu": 0.0, "cpu_ts": 0, "mem": 0, "mem_ts": 0}
+        if entry["cpu"] > peaks[name]["cpu"]:
+            peaks[name]["cpu"] = entry["cpu"]
+            peaks[name]["cpu_ts"] = entry["t"]
+        if entry["mem"] > peaks[name]["mem"]:
+            peaks[name]["mem"] = entry["mem"]
+            peaks[name]["mem_ts"] = entry["t"]
+
+    summary = []
+    for s in current_samples:
+        name = s["name"]
+        p = peaks.get(name, {})
+        summary.append({
+            "name": name,
+            "cpu": s["cpu"],
+            "mem": s["mem"],
+            "mem_str": s["mem_str"],
+            "uptime": uptimes.get(name, ""),
+            "restarts": restarts.get(name, 0),
+            "peak_cpu": p.get("cpu", s["cpu"]),
+            "peak_cpu_ts": p.get("cpu_ts", 0),
+            "peak_mem": p.get("mem", s["mem"]),
+            "peak_mem_ts": p.get("mem_ts", 0),
+        })
+
+    summary.sort(key=lambda x: x["name"].lower())
+    return summary
+
+
+def poll_container_stats():
+    while True:
+        try:
+            samples = collect_stats_sample()
+            if samples:
+                append_stats_to_file(samples)
+                prune_stats_file()
+        except Exception:
+            pass
+        time.sleep(STATS_POLL_INTERVAL_SECONDS)
+
+
+def clear_container_stats_dialog():
+    container_stats_dialog["window"] = None
+    container_stats_dialog["content"] = None
+    return GLib.SOURCE_REMOVE
+
+
+def destroy_container_stats_dialog():
+    window = container_stats_dialog["window"]
+    if window is not None:
+        window.destroy()
+    clear_container_stats_dialog()
+    return GLib.SOURCE_REMOVE
+
+
+def ensure_container_stats_dialog():
+    if container_stats_dialog["window"] is not None:
+        container_stats_dialog["window"].present()
+        return container_stats_dialog["window"]
+    window = Gtk.Window(title="Container Stats")
+    window.set_default_size(680, 400)
+    window.set_resizable(True)
+    window.set_keep_above(True)
+    window.set_skip_taskbar_hint(True)
+    window.set_position(Gtk.WindowPosition.CENTER)
+    window.connect("destroy", lambda w: clear_container_stats_dialog())
+    container_stats_dialog["window"] = window
+    return window
+
+
+def set_container_stats_content(content):
+    window = container_stats_dialog["window"]
+    old = container_stats_dialog["content"]
+    if window is None:
+        return
+    if old is not None:
+        window.remove(old)
+    container_stats_dialog["content"] = content
+    window.add(content)
+    window.show_all()
+    window.present()
+
+
+def show_container_stats_loading():
+    ensure_container_stats_dialog()
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+    box.set_border_width(16)
+    spinner = Gtk.Spinner()
+    spinner.start()
+    label = Gtk.Label(label="Loading container stats...")
+    label.set_xalign(0)
+    box.pack_start(spinner, False, False, 0)
+    box.pack_start(label, True, True, 0)
+    set_container_stats_content(box)
+    return GLib.SOURCE_REMOVE
+
+
+def make_stats_header_label(text):
+    label = Gtk.Label()
+    label.set_markup(f"<b>{text}</b>")
+    label.set_xalign(1)
+    label.set_margin_start(12)
+    return label
+
+
+def make_stats_cell(text, xalign=1, warning=False, dim=False):
+    label = Gtk.Label()
+    if warning:
+        label.set_markup(f"<span foreground='orange'>{text}</span>")
+    else:
+        label.set_text(text)
+    label.set_xalign(xalign)
+    label.set_margin_start(12)
+    if dim:
+        label.get_style_context().add_class("dim-label")
+    return label
+
+
+def show_container_stats(summary, error):
+    ensure_container_stats_dialog()
+    box = make_dialog_box()
+
+    if error:
+        label = Gtk.Label(label=f"Failed to load stats: {error}")
+        label.set_xalign(0)
+        label.set_line_wrap(True)
+        box.pack_start(label, False, False, 0)
+    elif not summary:
+        label = Gtk.Label(label="No running containers found.")
+        label.set_xalign(0)
+        box.pack_start(label, False, False, 0)
+    else:
+        header = Gtk.Label()
+        header.set_markup(f"<b>{len(summary)} containers  ·  peaks from last {STATS_HISTORY_HOURS}h</b>")
+        header.set_xalign(0)
+        box.pack_start(header, False, False, 0)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_min_content_height(300)
+
+        grid = Gtk.Grid()
+        grid.set_row_spacing(6)
+        grid.set_border_width(4)
+
+        headers = ["Container", "Uptime", "CPU", "Peak CPU", "RAM", "Peak RAM", "Restarts"]
+        for col, text in enumerate(headers):
+            lbl = make_stats_header_label(text)
+            if col == 0:
+                lbl.set_xalign(0)
+            grid.attach(lbl, col, 0, 1, 1)
+
+        sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        grid.attach(sep, 0, 1, len(headers), 1)
+
+        for row_idx, s in enumerate(summary):
+            row = row_idx + 2
+            has_spike = s["peak_cpu"] >= STATS_CPU_SPIKE_PCT
+            has_restarts = s["restarts"] > 0
+
+            name_text = f"⚠ {s['name']}" if (has_spike or has_restarts) else s["name"]
+            name_lbl = make_stats_cell(name_text, xalign=0, warning=(has_spike or has_restarts))
+            name_lbl.set_hexpand(True)
+            grid.attach(name_lbl, 0, row, 1, 1)
+
+            grid.attach(make_stats_cell(s["uptime"], dim=True), 1, row, 1, 1)
+            grid.attach(make_stats_cell(f"{s['cpu']:.1f}%"), 2, row, 1, 1)
+
+            peak_cpu_ts = f" ({format_ts(s['peak_cpu_ts'])})" if s["peak_cpu_ts"] else ""
+            peak_cpu_text = f"{s['peak_cpu']:.1f}%{peak_cpu_ts}"
+            grid.attach(make_stats_cell(peak_cpu_text, warning=has_spike, dim=bool(peak_cpu_ts)), 3, row, 1, 1)
+
+            mem_used = s["mem_str"].split("/")[0].strip() if "/" in s["mem_str"] else s["mem_str"]
+            grid.attach(make_stats_cell(mem_used), 4, row, 1, 1)
+
+            peak_mem_ts = f" ({format_ts(s['peak_mem_ts'])})" if s["peak_mem_ts"] else ""
+            peak_mem_text = f"{format_bytes(s['peak_mem'])}{peak_mem_ts}"
+            grid.attach(make_stats_cell(peak_mem_text, dim=bool(peak_mem_ts)), 5, row, 1, 1)
+
+            restarts_text = str(s["restarts"]) if s["restarts"] > 0 else "—"
+            grid.attach(make_stats_cell(restarts_text, warning=has_restarts), 6, row, 1, 1)
+
+        scroller.add(grid)
+        box.pack_start(scroller, True, True, 0)
+
+    buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    buttons.set_halign(Gtk.Align.END)
+
+    refresh_button = Gtk.Button(label="Refresh")
+    refresh_button.connect("clicked", lambda b: start_container_stats_load())
+    buttons.pack_start(refresh_button, False, False, 0)
+
+    close_button = Gtk.Button(label="Close")
+    close_button.connect("clicked", lambda b: destroy_container_stats_dialog())
+    buttons.pack_start(close_button, False, False, 0)
+
+    box.pack_start(buttons, False, False, 0)
+    set_container_stats_content(box)
+    return GLib.SOURCE_REMOVE
+
+
+def start_container_stats_load():
+    GLib.idle_add(show_container_stats_loading)
+
+    def _load():
+        try:
+            summary = build_stats_summary()
+            error = None
+        except Exception as e:
+            summary = []
+            error = f"{type(e).__name__}: {e}"
+        GLib.idle_add(show_container_stats, summary, error)
+
+    threading.Thread(target=_load, daemon=True).start()
+
+
+def open_container_stats_dialog(icon, item):
+    ensure_container_stats_dialog()
+    start_container_stats_load()
+
+
 def start_menu_polling(icon):
     icon.visible = True
     watch_theme(icon)
     threading.Thread(target=poll_menu, args=(icon,), daemon=True).start()
     threading.Thread(target=poll_updates, args=(icon,), daemon=True).start()
+    threading.Thread(target=poll_container_stats, daemon=True).start()
 
 
 def poll_menu(icon):
@@ -1364,6 +1736,7 @@ def open_updates_dialog(icon, item):
 
 def get_settings_items(pystray):
     return [
+        pystray.MenuItem("Container stats", open_container_stats_dialog),
         pystray.MenuItem("Compose search", make_compose_search_cb()),
         pystray.MenuItem("Cleanup", make_cleanup_cb()),
         pystray.MenuItem(
