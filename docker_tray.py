@@ -37,9 +37,10 @@ SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
 DOCKER_INSTALL_URL = "https://docs.docker.com/engine/install/ubuntu/"
 STATS_POLL_INTERVAL_SECONDS = 300
-STATS_HISTORY_HOURS = 48
 STATS_FILE = Path.home() / ".local" / "share" / "docker-tray" / "stats.jsonl"
 STATS_CPU_SPIKE_PCT = 80.0
+STATS_MAX_SIZE_MB = 50
+STATS_TRIM_DAYS = 30
 COMPOSE_FILE_NAMES = {
     "compose.yml",
     "compose.yaml",
@@ -1209,13 +1210,20 @@ def append_stats_to_file(samples):
             f.write(json.dumps(s) + "\n")
 
 
-def prune_stats_file():
+def trim_stats_file():
     if not STATS_FILE.exists():
         return
-    cutoff = time.time() - STATS_HISTORY_HOURS * 3600
+    cutoff = time.time() - STATS_TRIM_DAYS * 86400
     lines = STATS_FILE.read_text().splitlines()
     kept = [l for l in lines if l.strip() and json.loads(l).get("t", 0) >= cutoff]
     STATS_FILE.write_text("\n".join(kept) + ("\n" if kept else ""))
+
+
+def get_stats_file_size_mb():
+    try:
+        return STATS_FILE.stat().st_size / 1_000_000
+    except FileNotFoundError:
+        return 0.0
 
 
 def load_stats_history():
@@ -1353,7 +1361,6 @@ def poll_container_stats():
             samples = collect_stats_sample()
             if samples:
                 append_stats_to_file(samples)
-                prune_stats_file()
         except Exception:
             pass
         time.sleep(STATS_POLL_INTERVAL_SECONDS)
@@ -1378,7 +1385,7 @@ def ensure_container_stats_dialog():
         container_stats_dialog["window"].present()
         return container_stats_dialog["window"]
     window = Gtk.Window(title="Container Stats")
-    window.set_default_size(680, 400)
+    window.set_default_size(780, 600)
     window.set_resizable(True)
     window.set_keep_above(True)
     window.set_skip_taskbar_hint(True)
@@ -1477,17 +1484,29 @@ def show_container_stats(summary, system_mem_total, error):
                 issue_label.set_xalign(0)
                 box.pack_start(issue_label, False, False, 0)
 
+        size_mb = get_stats_file_size_mb()
+        if size_mb >= STATS_MAX_SIZE_MB:
+            size_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            size_label = Gtk.Label(label=f"History log is {size_mb:.0f} MB — trim to last {STATS_TRIM_DAYS} days?")
+            size_label.set_xalign(0)
+            size_label.set_hexpand(True)
+            trim_button = Gtk.Button(label="Trim")
+            trim_button.connect("clicked", lambda b: (trim_stats_file(), start_container_stats_load()))
+            size_row.pack_start(size_label, True, True, 0)
+            size_row.pack_start(trim_button, False, False, 0)
+            box.pack_start(size_row, False, False, 0)
+
         sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         box.pack_start(sep, False, False, 4)
 
         header = Gtk.Label()
-        header.set_markup(f"<b>peaks from last {STATS_HISTORY_HOURS}h</b>")
+        header.set_markup("<b>all-time peaks</b>")
         header.set_xalign(0)
         box.pack_start(header, False, False, 0)
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroller.set_min_content_height(300)
+        scroller.set_min_content_height(450)
 
         grid = Gtk.Grid()
         grid.set_row_spacing(6)
