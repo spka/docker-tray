@@ -15,6 +15,7 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 - `icon-light.png` - tray icon for light panels (black badge, 256×256).
 - `requirements.txt` - Python package notes.
 - `~/.config/autostart/docker-tray.desktop` - starts the tray app on login.
+- `~/.local/share/docker-tray/stats.jsonl` - container stats history (JSONL, one sample per container per poll, fields: `t`, `name`, `cpu`, `mem`, `mem_str`). Polled every ~5 minutes. Read this file to inspect historical CPU/memory data instead of relying on live `docker stats`.
 
 ## Stack
 
