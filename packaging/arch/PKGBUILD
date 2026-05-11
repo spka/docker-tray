@@ -1,0 +1,60 @@
+pkgname=docker-tray
+pkgver=0.1.7
+pkgrel=1
+pkgdesc="Small Docker tray utility"
+arch=("any")
+url="https://github.com/spka/docker-tray"
+license=("MIT")
+depends=(
+  "docker"
+  "gtk3"
+  "libayatana-appindicator"
+  "python"
+  "python-gobject"
+  "python-pillow"
+  "python-pystray"
+)
+source=()
+sha256sums=()
+
+package() {
+  local repo_root="${startdir}/../.."
+
+  install -Dm755 "${repo_root}/docker_tray.py" "${pkgdir}/usr/lib/docker-tray/docker_tray.py"
+  install -Dm644 "${repo_root}/docker_tray_platform.py" "${pkgdir}/usr/lib/docker-tray/docker_tray_platform.py"
+
+  install -Dm644 "${repo_root}/icon-dark.png" "${pkgdir}/usr/share/docker-tray/icon-dark.png"
+  install -Dm644 "${repo_root}/icon-light.png" "${pkgdir}/usr/share/docker-tray/icon-light.png"
+  install -Dm644 "${repo_root}/icon-light.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/docker-tray.png"
+
+  install -Dm644 "${repo_root}/README.md" "${pkgdir}/usr/share/doc/docker-tray/README.md"
+  install -Dm644 "${repo_root}/LICENSE" "${pkgdir}/usr/share/licenses/docker-tray/LICENSE"
+
+  install -Dm755 /dev/stdin "${pkgdir}/usr/bin/docker-tray" <<'WRAPPER'
+#!/usr/bin/env sh
+exec python3 /usr/lib/docker-tray/docker_tray.py "$@"
+WRAPPER
+
+  install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/docker-tray.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Docker Tray
+Exec=docker-tray
+Icon=/usr/share/docker-tray/icon-light.png
+Comment=Docker container monitor in the system tray
+Categories=Utility;
+Terminal=false
+DESKTOP
+
+  install -Dm644 /dev/stdin "${pkgdir}/etc/xdg/autostart/docker-tray.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Docker Tray
+Exec=docker-tray
+Icon=/usr/share/docker-tray/icon-light.png
+Comment=Docker container monitor in the system tray
+Categories=Utility;
+Terminal=false
+Hidden=false
+DESKTOP
+}

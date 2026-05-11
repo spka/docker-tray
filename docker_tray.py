@@ -2,7 +2,6 @@
 import fcntl
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -16,6 +15,8 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib, Gio
 
 from PIL import Image
+
+import docker_tray_platform
 
 
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
@@ -35,7 +36,8 @@ DOCKER_MANIFEST_TIMEOUT_SECONDS = 30
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
-DOCKER_INSTALL_URL = "https://docs.docker.com/engine/install/ubuntu/"
+AUTOSTART_HIDDEN_PREFIX = "Hidden="
+PLATFORM_INFO = docker_tray_platform.get_platform_info()
 STATS_POLL_INTERVAL_SECONDS = 300
 STATS_FILE = Path.home() / ".local" / "share" / "docker-tray" / "stats.jsonl"
 STATS_CPU_SPIKE_PCT = 80.0
@@ -80,8 +82,7 @@ cleanup_dialog = {
     "spinner": None,
 }
 update_check_state = {
-    "engine_update": False,
-    "engine_detail": "",
+    "engine_update": docker_tray_platform.EngineUpdate(False),
     "image_updates": [],
 }
 updates_dialog = {
@@ -144,11 +145,7 @@ def acquire_instance_lock():
 
 
 def is_dark_mode():
-    try:
-        settings = Gio.Settings.new("org.gnome.desktop.interface")
-        return settings.get_string("color-scheme") == "prefer-dark"
-    except Exception:
-        return True
+    return docker_tray_platform.is_dark_mode(Gio, PLATFORM_INFO)
 
 
 def make_icon():
@@ -157,11 +154,11 @@ def make_icon():
 
 
 def watch_theme(icon):
-    settings = Gio.Settings.new("org.gnome.desktop.interface")
-    def on_changed(settings, key):
-        if key == "color-scheme":
-            icon.icon = make_icon()
-    settings.connect("changed", on_changed)
+    icon._theme_settings = docker_tray_platform.watch_theme(
+        Gio,
+        PLATFORM_INFO,
+        lambda: setattr(icon, "icon", make_icon()),
+    )
 
 
 def get_containers():
@@ -169,10 +166,23 @@ def get_containers():
         ["docker", "ps", "-a", "--format", DOCKER_PS_FORMAT],
         capture_output=True,
         text=True,
-        check=True,
         timeout=DOCKER_CMD_TIMEOUT_SECONDS,
     )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "docker ps failed"
+        raise RuntimeError(format_docker_error(message))
     return parse_containers(result.stdout)
+
+
+def format_docker_error(message):
+    lower = message.lower()
+    if "permission denied" in lower and "docker.sock" in lower:
+        return "Docker socket permission denied. Add your user to the docker group and log back in."
+    if "no such file or directory" in lower and "docker.sock" in lower:
+        return "Docker daemon is not running. Start docker.service."
+    if "cannot connect to the docker daemon" in lower:
+        return "Docker daemon is not running."
+    return message
 
 
 def is_docker_installed():
@@ -1026,6 +1036,8 @@ def read_autostart_enabled():
             continue
 
         for line in lines:
+            if line.startswith(AUTOSTART_HIDDEN_PREFIX):
+                return line.split("=", 1)[1].strip().lower() != "true"
             if line.startswith(AUTOSTART_ENABLED_PREFIX):
                 return line.split("=", 1)[1].strip().lower() == "true"
 
@@ -1036,7 +1048,10 @@ def read_autostart_enabled():
 
 def get_autostart_exec():
     script_path = Path(__file__).resolve()
-    if script_path == Path("/usr/bin/docker-tray"):
+    if script_path in (
+        Path("/usr/bin/docker-tray"),
+        Path("/usr/lib/docker-tray/docker_tray.py"),
+    ):
         return "docker-tray"
     return f'python3 "{script_path}"'
 
@@ -1049,6 +1064,7 @@ def build_autostart_desktop(enabled):
         f"Exec={get_autostart_exec()}",
         "Icon=docker",
         "Comment=Docker container monitor in the system tray",
+        f"{AUTOSTART_HIDDEN_PREFIX}{str(not enabled).lower()}",
         f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}",
         "",
     ])
@@ -1064,13 +1080,18 @@ def write_autostart_enabled(enabled):
     except Exception:
         return
     else:
-        updated = False
+        gnome_updated = False
+        hidden_updated = False
         for index, line in enumerate(lines):
             if line.startswith(AUTOSTART_ENABLED_PREFIX):
                 lines[index] = f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}"
-                updated = True
-                break
-        if not updated:
+                gnome_updated = True
+            elif line.startswith(AUTOSTART_HIDDEN_PREFIX):
+                lines[index] = f"{AUTOSTART_HIDDEN_PREFIX}{str(not enabled).lower()}"
+                hidden_updated = True
+        if not hidden_updated:
+            lines.append(f"{AUTOSTART_HIDDEN_PREFIX}{str(not enabled).lower()}")
+        if not gnome_updated:
             lines.append(f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}")
 
     AUTOSTART_DESKTOP_FILE.write_text("\n".join(lines).rstrip() + "\n")
@@ -1106,7 +1127,7 @@ def open_url(port):
 
 
 def open_docker_install():
-    open_uri(DOCKER_INSTALL_URL)
+    open_uri(docker_tray_platform.get_docker_install_url(PLATFORM_INFO))
 
 
 def make_open_cb(port):
@@ -1613,34 +1634,7 @@ def poll_menu(icon):
 
 
 def check_engine_update():
-    result = subprocess.run(
-        ["apt", "list", "--upgradable"],
-        capture_output=True, text=True,
-        timeout=DOCKER_CMD_TIMEOUT_SECONDS,
-    )
-    arch = _local_arch()
-    for line in result.stdout.splitlines():
-        if not line.startswith("docker-ce/"):
-            continue
-        detail = ""
-        version_match = re.search(rf"\s(\S+)\s+{arch}", line)
-        current_match = re.search(r"\[upgradable from: (\S+)\]", line)
-        if version_match and current_match:
-            new_ver = re.search(r":(\d+\.\d+\.\d+)", version_match.group(1))
-            old_ver = re.search(r":(\d+\.\d+\.\d+)", current_match.group(1))
-            if new_ver and old_ver:
-                detail = f"{old_ver.group(1)} → {new_ver.group(1)}"
-        return True, detail
-    return False, ""
-
-
-def _local_arch():
-    m = platform.machine()
-    if m == "x86_64":
-        return "amd64"
-    if m == "aarch64":
-        return "arm64"
-    return m
+    return docker_tray_platform.check_engine_update(DOCKER_CMD_TIMEOUT_SECONDS, PLATFORM_INFO)
 
 
 def get_local_image_id(image):
@@ -1664,7 +1658,7 @@ def get_remote_config_digest(image):
         data = json.loads(result.stdout)
     except Exception:
         return None
-    arch = _local_arch()
+    arch = docker_tray_platform.linux_package_arch()
     if isinstance(data, list):
         for entry in data:
             p = entry.get("Descriptor", {}).get("platform", {})
@@ -1699,10 +1693,9 @@ def check_image_updates():
 
 def run_update_check(icon):
     try:
-        engine_update, engine_detail = check_engine_update()
+        engine_update = check_engine_update()
     except Exception:
         engine_update = update_check_state["engine_update"]
-        engine_detail = update_check_state["engine_detail"]
     try:
         image_updates = check_image_updates()
     except Exception:
@@ -1713,7 +1706,6 @@ def run_update_check(icon):
         or image_updates != update_check_state["image_updates"]
     )
     update_check_state["engine_update"] = engine_update
-    update_check_state["engine_detail"] = engine_detail
     update_check_state["image_updates"] = image_updates
     if changed:
         update_tray_menu(icon)
@@ -1773,10 +1765,7 @@ def start_docker_engine_upgrade(button, icon):
     button.set_sensitive(False)
 
     def _upgrade():
-        result = subprocess.run(
-            ["pkexec", "apt-get", "install", "-y", "--only-upgrade", "docker-ce"],
-            capture_output=True, text=True,
-        )
+        result = docker_tray_platform.run_engine_upgrade(update_check_state["engine_update"])
         def _done():
             if result.returncode == 0:
                 button.set_label("Done!")
@@ -1794,17 +1783,23 @@ def show_updates_dialog(icon):
     ensure_updates_dialog()
     box = make_dialog_box()
 
-    if update_check_state["engine_update"]:
-        engine_label = Gtk.Label(label="Docker CE update available")
+    engine_update = update_check_state["engine_update"]
+    if engine_update.available:
+        engine_label = Gtk.Label(label=f"{engine_update.package_name} update available")
         engine_label.set_xalign(0)
         box.pack_start(engine_label, False, False, 0)
-        if update_check_state["engine_detail"]:
-            detail = Gtk.Label(label=update_check_state["engine_detail"])
+        if engine_update.detail:
+            detail = Gtk.Label(label=engine_update.detail)
             detail.set_xalign(0)
             box.pack_start(detail, False, False, 0)
-        upgrade_button = Gtk.Button(label="Upgrade Docker CE")
-        upgrade_button.connect("clicked", lambda b: start_docker_engine_upgrade(upgrade_button, icon))
-        box.pack_start(upgrade_button, False, False, 0)
+        if engine_update.can_upgrade:
+            upgrade_button = Gtk.Button(label=engine_update.upgrade_label)
+            upgrade_button.connect("clicked", lambda b: start_docker_engine_upgrade(upgrade_button, icon))
+            box.pack_start(upgrade_button, False, False, 0)
+        else:
+            detail = Gtk.Label(label="Use your system package manager to upgrade Docker.")
+            detail.set_xalign(0)
+            box.pack_start(detail, False, False, 0)
 
     if update_check_state["image_updates"]:
         images_label = Gtk.Label(label="Image updates available:")
@@ -1848,7 +1843,7 @@ def get_menu_items(pystray):
         items.append(pystray.MenuItem("🔴 Container issue detected", open_container_stats_dialog))
     elif container_health_state["level"] == "warning":
         items.append(pystray.MenuItem("🟡 Container warning", open_container_stats_dialog))
-    if update_check_state["engine_update"]:
+    if update_check_state["engine_update"].available:
         items.append(pystray.MenuItem("⬆️ Docker update available", open_updates_dialog))
     for image in update_check_state["image_updates"]:
         items.append(pystray.MenuItem(f"⬆️ {image} update available", open_updates_dialog))
@@ -1884,7 +1879,7 @@ def get_menu_items(pystray):
                 )
                 items.append(pystray.MenuItem(label, pystray.Menu(*sub)))
         except Exception as e:
-            items.append(pystray.MenuItem(f"Error: {type(e).__name__}: {e}", None))
+            items.append(pystray.MenuItem(f"Error: {e}", None))
 
     items += [
         pystray.Menu.SEPARATOR,
