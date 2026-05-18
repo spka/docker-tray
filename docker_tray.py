@@ -19,6 +19,7 @@ from PIL import Image
 import docker_tray_platform
 
 
+APP_VERSION = "0.1.11"
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Names}}\t"
@@ -1950,6 +1951,8 @@ def get_settings_items(pystray):
             get_start_at_boot_label,
             toggle_start_at_boot,
         ),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem(f"Version {APP_VERSION}", None, enabled=False),
     ]
 
 
