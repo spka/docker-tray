@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.1.11}"
+version="${1:-0.1.12}"
 package="docker-tray"
 root="dist/${package}_${version}_all"
 

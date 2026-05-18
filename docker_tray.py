@@ -19,7 +19,7 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.1.11"
+APP_VERSION = "0.1.12"
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Names}}\t"
@@ -47,7 +47,13 @@ AUTOSTART_HIDDEN_PREFIX = "Hidden="
 PLATFORM_INFO = docker_tray_platform.get_platform_info()
 STATS_POLL_INTERVAL_SECONDS = 300
 STATS_FILE = Path.home() / ".local" / "share" / "docker-tray" / "stats.jsonl"
-STATS_CPU_SPIKE_PCT = 80.0
+CPU_COUNT = os.cpu_count() or 1
+STATS_CPU_WARNING_CAPACITY = 0.60
+STATS_CPU_CRITICAL_CAPACITY = 0.80
+STATS_CPU_WARNING_PCT = 100.0 * CPU_COUNT * STATS_CPU_WARNING_CAPACITY
+STATS_CPU_CRITICAL_PCT = 100.0 * CPU_COUNT * STATS_CPU_CRITICAL_CAPACITY
+STATS_CPU_SUSTAINED_SAMPLES = 2
+STATS_CPU_SUSTAINED_WINDOW_SECONDS = 15 * 60
 STATS_MAX_SIZE_MB = 50
 STATS_TRIM_DAYS = 30
 COMPOSE_FILE_NAMES = {
@@ -102,6 +108,7 @@ container_stats_dialog = {
 }
 container_health_state = {
     "level": "ok",
+    "ack_ts": 0,
 }
 
 
@@ -1364,8 +1371,11 @@ def build_stats_summary():
     current_samples = collect_stats_sample()
     restarts = get_container_restart_counts()
     uptimes = get_container_uptimes()
+    recent_cutoff = time.time() - STATS_CPU_SUSTAINED_WINDOW_SECONDS
 
     peaks = {}
+    recent_warning_counts = {}
+    recent_critical_counts = {}
     for entry in history:
         name = entry["name"]
         if name not in peaks:
@@ -1376,11 +1386,22 @@ def build_stats_summary():
         if entry["mem"] > peaks[name]["mem"]:
             peaks[name]["mem"] = entry["mem"]
             peaks[name]["mem_ts"] = entry["t"]
+        if entry.get("t", 0) >= recent_cutoff:
+            if entry["cpu"] >= STATS_CPU_WARNING_PCT:
+                recent_warning_counts[name] = recent_warning_counts.get(name, 0) + 1
+            if entry["cpu"] >= STATS_CPU_CRITICAL_PCT:
+                recent_critical_counts[name] = recent_critical_counts.get(name, 0) + 1
 
     summary = []
     for s in current_samples:
         name = s["name"]
         p = peaks.get(name, {})
+        recent_warning_count = recent_warning_counts.get(name, 0)
+        recent_critical_count = recent_critical_counts.get(name, 0)
+        if s["cpu"] >= STATS_CPU_WARNING_PCT:
+            recent_warning_count += 1
+        if s["cpu"] >= STATS_CPU_CRITICAL_PCT:
+            recent_critical_count += 1
         summary.append({
             "name": name,
             "cpu": s["cpu"],
@@ -1392,6 +1413,8 @@ def build_stats_summary():
             "peak_cpu_ts": p.get("cpu_ts", 0),
             "peak_mem": p.get("mem", s["mem"]),
             "peak_mem_ts": p.get("mem_ts", 0),
+            "recent_cpu_warning_count": recent_warning_count,
+            "recent_cpu_critical_count": recent_critical_count,
         })
 
     system_mem_total = 0
@@ -1406,9 +1429,10 @@ def build_stats_summary():
     return summary, system_mem_total
 
 
-def compute_health(summary, system_mem_total):
+def compute_health(summary, system_mem_total, acknowledge_ts=None):
     issues = []
     level = "ok"
+    acknowledge_ts = acknowledge_ts or 0
 
     total_cpu = sum(s["cpu"] for s in summary)
     total_mem = sum(s["mem"] for s in summary)
@@ -1421,14 +1445,21 @@ def compute_health(summary, system_mem_total):
         if s["restarts"] > 0:
             level = "critical"
             issues.append(f"⚠ {s['name']}: {s['restarts']} restart(s)")
-        if s["peak_cpu"] >= 80:
+        if s.get("recent_cpu_critical_count", 0) >= STATS_CPU_SUSTAINED_SAMPLES:
             level = "critical"
-            ts = f" at {format_ts(s['peak_cpu_ts'])}" if s["peak_cpu_ts"] else ""
-            issues.append(f"⚠ {s['name']}: peak CPU {s['peak_cpu']:.1f}%{ts}")
-        elif s["peak_cpu"] >= 60 and level == "ok":
+            issues.append(f"⚠ {s['name']}: sustained CPU {s['cpu']:.1f}%")
+        elif s.get("recent_cpu_warning_count", 0) >= STATS_CPU_SUSTAINED_SAMPLES and level == "ok":
             level = "warning"
-            ts = f" at {format_ts(s['peak_cpu_ts'])}" if s["peak_cpu_ts"] else ""
-            issues.append(f"↑ {s['name']}: peak CPU {s['peak_cpu']:.1f}%{ts}")
+            issues.append(f"↑ {s['name']}: sustained CPU {s['cpu']:.1f}%")
+        elif s["peak_cpu_ts"] > acknowledge_ts:
+            if s["peak_cpu"] >= STATS_CPU_CRITICAL_PCT:
+                level = "critical"
+                ts = f" at {format_ts(s['peak_cpu_ts'])}" if s["peak_cpu_ts"] else ""
+                issues.append(f"⚠ {s['name']}: peak CPU {s['peak_cpu']:.1f}%{ts}")
+            elif s["peak_cpu"] >= STATS_CPU_WARNING_PCT and level == "ok":
+                level = "warning"
+                ts = f" at {format_ts(s['peak_cpu_ts'])}" if s["peak_cpu_ts"] else ""
+                issues.append(f"↑ {s['name']}: peak CPU {s['peak_cpu']:.1f}%{ts}")
 
     if peak_mem_pct >= 85:
         if level != "critical":
@@ -1448,7 +1479,11 @@ def poll_container_stats(icon):
             if samples:
                 append_stats_to_file(samples)
                 summary, system_mem_total = build_stats_summary()
-                level, *_ = compute_health(summary, system_mem_total)
+                level, *_ = compute_health(
+                    summary,
+                    system_mem_total,
+                    acknowledge_ts=container_health_state["ack_ts"],
+                )
                 if level != container_health_state["level"]:
                     container_health_state["level"] = level
                     update_tray_menu(icon)
@@ -1548,7 +1583,11 @@ def show_container_stats(summary, system_mem_total, error):
         label.set_xalign(0)
         box.pack_start(label, False, False, 0)
     else:
-        level, total_cpu, total_mem, sys_mem, mem_pct, issues = compute_health(summary, system_mem_total)
+        level, total_cpu, total_mem, sys_mem, mem_pct, issues = compute_health(
+            summary,
+            system_mem_total,
+            acknowledge_ts=container_health_state["ack_ts"],
+        )
 
         badge = {"ok": "🟢 Healthy", "warning": "🟡 Watch", "critical": "🔴 Action needed"}[level]
         color = {"ok": "green", "warning": "orange", "critical": "red"}[level]
@@ -1611,7 +1650,7 @@ def show_container_stats(summary, system_mem_total, error):
 
         for row_idx, s in enumerate(summary):
             row = row_idx + 2
-            has_spike = s["peak_cpu"] >= STATS_CPU_SPIKE_PCT
+            has_spike = s["peak_cpu"] >= STATS_CPU_CRITICAL_PCT
             has_restarts = s["restarts"] > 0
 
             name_text = f"⚠ {s['name']}" if (has_spike or has_restarts) else s["name"]
@@ -1671,6 +1710,9 @@ def start_container_stats_load():
 
 
 def open_container_stats_dialog(icon, item):
+    container_health_state["ack_ts"] = time.time()
+    container_health_state["level"] = "ok"
+    update_tray_menu(icon)
     ensure_container_stats_dialog()
     start_container_stats_load()
 
