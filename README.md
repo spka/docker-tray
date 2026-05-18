@@ -1,7 +1,7 @@
 # docker-tray
 
-A small Ubuntu/GNOME tray utility for people running Docker Compose services on
-a home server or workstation.
+A small Linux tray utility for people running Docker Compose services on a home
+server or workstation.
 
 It keeps common Docker chores out of the terminal: check which containers are
 running, start or stop them, restart a service, and open exposed web ports in
@@ -18,9 +18,19 @@ package downloads, and more bundled extras than a small home-server workflow
 needs. This keeps the heavy lifting in the Docker CLI and adds only a small tray
 menu for quick checks and actions.
 
-## Install
+## Supported Desktops And Distros
 
-For normal use, install the release package and run the packaged launcher:
+Docker Tray is tested first on Ubuntu/GNOME and includes platform support for
+Arch-family distributions on KDE Plasma.
+
+The core tray actions use the Docker CLI and should be portable across Linux
+desktops with AppIndicator/StatusNotifier tray support. Distro-specific behavior
+is isolated to install help, Docker Engine update checks, theme detection, and
+packaging.
+
+## Install On Debian/Ubuntu
+
+Install the release package and run the packaged launcher:
 
 ```bash
 # Download the release package to /tmp.
@@ -37,6 +47,18 @@ rm /tmp/docker-tray_0.1.5_all.deb
 ```
 
 Docker Tray starts automatically on login after installing the package.
+
+## Install On Arch Linux
+
+Use the Arch package recipe in `packaging/arch/PKGBUILD`.
+
+```bash
+cd packaging/arch
+makepkg -si
+```
+
+On KDE Plasma, make sure the system tray is enabled and configured to show
+application status items.
 
 Docker must already be installed, and your user must be able to run `docker`
 without a password.

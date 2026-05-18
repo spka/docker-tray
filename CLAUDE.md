@@ -1,6 +1,6 @@
 # docker-tray
 
-System tray app for Ubuntu GNOME on Wayland. It lists running Docker
+System tray app for Linux desktops with AppIndicator/StatusNotifier support. It lists running Docker
 containers, shows a submenu for each container, and lets the user open exposed
 web ports in the browser or restart the container.
 
@@ -11,6 +11,8 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 ## Files
 
 - `docker_tray.py` - main app.
+- `docker_tray_platform.py` - distro/desktop detection, install URLs, Docker
+  Engine update providers, and theme detection.
 - `icon-dark.png` - tray icon for dark panels (white badge, 256×256).
 - `icon-light.png` - tray icon for light panels (black badge, 256×256).
 - `requirements.txt` - Python package notes.
@@ -20,7 +22,8 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 ## Stack
 
 - `pystray` - system tray icon and dynamic menu.
-- `ayatana-appindicator3` backend - pystray backend used on Ubuntu/GNOME.
+- `ayatana-appindicator3` backend - pystray backend used on GNOME and KDE
+  Plasma sessions with AppIndicator/StatusNotifier tray support.
 - `Pillow` - loads the tray icon PNG.
 - `GTK3` via `gi.repository.Gtk`, `GLib`, and `Gio` - required for Wayland-aware
   URL opening and light/dark theme detection.
@@ -129,22 +132,26 @@ is on `PATH`. If it is missing, the menu shows:
 - `Docker is not installed`
 - `Download Docker ↗`
 
-The download item opens Docker's official Ubuntu Engine install page:
+The download item opens a platform-specific Docker install page:
 
 ```text
-https://docs.docker.com/engine/install/ubuntu/
+Ubuntu: https://docs.docker.com/engine/install/ubuntu/
+Debian: https://docs.docker.com/engine/install/debian/
+Arch: https://wiki.archlinux.org/title/Docker
 ```
 
-Keep this pointed at official Docker documentation. The app still handles Docker
-daemon or permission errors separately through the normal error menu item.
+Keep this in `docker_tray_platform.py`. The app still handles Docker daemon or
+permission errors separately through the normal error menu item.
 
 ### Light/Dark Tray Icon
 
 The app ships two icon files — `icon-dark.png` (white badge, for dark panels) and
 `icon-light.png` (black badge, for light panels). On startup, `is_dark_mode()`
-reads `org.gnome.desktop.interface color-scheme` via `Gio.Settings` to pick the
-right file. A GSettings listener in `watch_theme()` swaps `icon.icon` live when
-the system theme changes — no restart needed.
+delegates to `docker_tray_platform.py`. GNOME reads
+`org.gnome.desktop.interface color-scheme` via `Gio.Settings`; KDE Plasma uses
+`~/.config/kdeglobals` as a best-effort fallback. GNOME registers a GSettings
+listener in `watch_theme()` to swap `icon.icon` live when the system theme
+changes.
 
 To replace the icons: put new 256×256 PNGs in the same directory and restart the
 app. Keep both files present; the app will crash on startup if either is missing.
@@ -232,7 +239,8 @@ icon does not appear.
 ### Start At Boot Toggle
 
 The tray menu has a `Settings` submenu with a `Start at boot` toggle. That
-toggle reads and writes the `X-GNOME-Autostart-enabled` value inside
+toggle reads and writes the XDG `Hidden` value and preserves the GNOME
+`X-GNOME-Autostart-enabled` value inside
 `~/.config/autostart/docker-tray.desktop`.
 
 When enabled, the menu label renders as `Start at boot ✓`. This keeps the state
