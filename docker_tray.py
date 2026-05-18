@@ -26,6 +26,12 @@ DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Label \"com.docker.compose.project.config_files\"}}\t"
     "{{.Label \"com.docker.compose.project.working_dir\"}}"
 )
+DOCKER_IMAGE_COMPOSE_LABEL_FORMAT = (
+    "{{.Image}}\t"
+    "{{.Label \"com.docker.compose.project.config_files\"}}\t"
+    "{{.Label \"com.docker.compose.project.working_dir\"}}\t"
+    "{{.Label \"com.docker.compose.service\"}}"
+)
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
 COMPOSE_START_POLL_SECONDS = 2
@@ -251,6 +257,19 @@ def run_docker_capture(args, check=True):
     )
 
 
+def run_compose_pull(config_files, service, working_dir):
+    command = ["docker", "compose"]
+    for config_file in config_files:
+        command += ["-f", str(config_file)]
+    command += ["pull", service]
+    return subprocess.run(
+        command,
+        cwd=working_dir or None,
+        capture_output=True,
+        text=True,
+    )
+
+
 def should_skip_compose_scan_dir(root, dirname):
     path = Path(root, dirname)
     try:
@@ -283,6 +302,19 @@ def scan_compose_files(root=Path.home()):
 
 def normalize_compose_path(path):
     return Path(path).expanduser().resolve(strict=False)
+
+
+def resolve_compose_config_files(config_files, working_dir):
+    resolved = []
+    for config_file in config_files.split(","):
+        config_file = config_file.strip()
+        if not config_file:
+            continue
+        config_path = Path(config_file)
+        if not config_path.is_absolute() and working_dir:
+            config_path = Path(working_dir, config_path)
+        resolved.append(normalize_compose_path(config_path))
+    return tuple(resolved)
 
 
 def get_compose_file_states_from_containers():
@@ -319,6 +351,35 @@ def get_compose_file_states_from_containers():
             )
 
     return compose_states
+
+
+def get_compose_pull_targets_for_image(image):
+    result = run_docker_capture(
+        ["docker", "ps", "-a", "--format", DOCKER_IMAGE_COMPOSE_LABEL_FORMAT],
+        check=False,
+    )
+    targets = []
+    seen = set()
+
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) < 4:
+            continue
+        container_image, config_files, working_dir, service = (part.strip() for part in parts)
+        if container_image != image or not config_files or not service:
+            continue
+
+        resolved_config_files = resolve_compose_config_files(config_files, working_dir)
+        if not resolved_config_files:
+            continue
+
+        key = (resolved_config_files, working_dir, service)
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append((resolved_config_files, service, working_dir))
+
+    return targets
 
 
 def get_scanned_compose_files_with_states(root):
@@ -1781,6 +1842,49 @@ def start_docker_engine_upgrade(button, icon):
     threading.Thread(target=_upgrade, daemon=True).start()
 
 
+def finish_image_pull(icon, image):
+    update_check_state["image_updates"] = [
+        update_image for update_image in update_check_state["image_updates"]
+        if update_image != image
+    ]
+    update_tray_menu(icon)
+    if update_check_state["engine_update"].available or update_check_state["image_updates"]:
+        show_updates_dialog(icon)
+    else:
+        destroy_updates_dialog()
+    threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
+    return GLib.SOURCE_REMOVE
+
+
+def fail_image_pull(button, label):
+    if button.get_parent() is None:
+        return GLib.SOURCE_REMOVE
+    button.set_label(label)
+    button.set_sensitive(True)
+    return GLib.SOURCE_REMOVE
+
+
+def start_image_compose_pull(button, icon, image):
+    button.set_label("Pulling...")
+    button.set_sensitive(False)
+
+    def _pull():
+        targets = get_compose_pull_targets_for_image(image)
+        if not targets:
+            GLib.idle_add(fail_image_pull, button, "No compose service")
+            return
+
+        for config_files, service, working_dir in targets:
+            result = run_compose_pull(config_files, service, working_dir)
+            if result.returncode != 0:
+                GLib.idle_add(fail_image_pull, button, "Pull failed")
+                return
+
+        GLib.idle_add(finish_image_pull, icon, image)
+
+    threading.Thread(target=_pull, daemon=True).start()
+
+
 def show_updates_dialog(icon):
     ensure_updates_dialog()
     box = make_dialog_box()
@@ -1808,8 +1912,18 @@ def show_updates_dialog(icon):
         images_label.set_xalign(0)
         box.pack_start(images_label, False, False, 0)
         for image in update_check_state["image_updates"]:
-            row = Gtk.Label(label=f"  {image}")
-            row.set_xalign(0)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            image_label = Gtk.Label(label=image)
+            image_label.set_xalign(0)
+            image_label.set_hexpand(True)
+            image_label.set_line_wrap(True)
+            pull_button = Gtk.Button(label="Compose pull")
+            pull_button.connect(
+                "clicked",
+                lambda button, pull_image=image: start_image_compose_pull(button, icon, pull_image),
+            )
+            row.pack_start(image_label, True, True, 0)
+            row.pack_start(pull_button, False, False, 0)
             box.pack_start(row, False, False, 0)
 
     close_button = Gtk.Button(label="Close")
