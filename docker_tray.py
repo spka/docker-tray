@@ -1768,7 +1768,9 @@ def start_docker_engine_upgrade(button, icon):
         result = docker_tray_platform.run_engine_upgrade(update_check_state["engine_update"])
         def _done():
             if result.returncode == 0:
-                button.set_label("Done!")
+                update_check_state["engine_update"] = docker_tray_platform.EngineUpdate(False)
+                update_tray_menu(icon)
+                destroy_updates_dialog()
                 threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
             else:
                 button.set_label("Failed — check terminal")
