@@ -19,7 +19,7 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.1.12"
+APP_VERSION = "0.1.24"
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Names}}\t"
@@ -27,11 +27,12 @@ DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Label \"com.docker.compose.project.config_files\"}}\t"
     "{{.Label \"com.docker.compose.project.working_dir\"}}"
 )
-DOCKER_IMAGE_COMPOSE_LABEL_FORMAT = (
+DOCKER_INSPECT_COMPOSE_LABEL_FORMAT = (
+    "{{.Config.Image}}\t"
     "{{.Image}}\t"
-    "{{.Label \"com.docker.compose.project.config_files\"}}\t"
-    "{{.Label \"com.docker.compose.project.working_dir\"}}\t"
-    "{{.Label \"com.docker.compose.service\"}}"
+    "{{index .Config.Labels \"com.docker.compose.project.config_files\"}}\t"
+    "{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}\t"
+    "{{index .Config.Labels \"com.docker.compose.service\"}}"
 )
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
@@ -40,6 +41,8 @@ COMPOSE_START_POLL_ATTEMPTS = 30
 UPDATE_CHECK_INTERVAL_SECONDS = 3600
 DOCKER_CMD_TIMEOUT_SECONDS = 15
 DOCKER_MANIFEST_TIMEOUT_SECONDS = 30
+DOCKER_COMPOSE_PULL_TIMEOUT_SECONDS = 10 * 60
+DOCKER_COMPOSE_UP_TIMEOUT_SECONDS = 3 * 60
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
@@ -98,9 +101,12 @@ update_check_state = {
     "engine_update": docker_tray_platform.EngineUpdate(False),
     "image_updates": [],
 }
+update_check_lock = threading.Lock()
 updates_dialog = {
     "window": None,
     "content": None,
+    "status": "",
+    "pulling_images": set(),
 }
 container_stats_dialog = {
     "window": None,
@@ -108,8 +114,9 @@ container_stats_dialog = {
 }
 container_health_state = {
     "level": "ok",
-    "ack_ts": 0,
 }
+tray_menu_update_lock = threading.Lock()
+tray_menu_update_pending = False
 
 
 ICON_NAMES = ("icon-dark.png", "icon-light.png")
@@ -239,20 +246,38 @@ def extract_web_port(ports_str):
     return match.group(1) if match else None
 
 
-def run_docker_action(action, name):
-    threading.Thread(
-        target=subprocess.run,
-        args=(["docker", action, name],),
-        daemon=True,
-    ).start()
+def run_docker_action(action, name, icon=None):
+    def _run():
+        try:
+            subprocess.run(
+                ["docker", action, name],
+                capture_output=True,
+                text=True,
+                timeout=DOCKER_CMD_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            pass
+        if icon is not None:
+            update_tray_menu(icon)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
-def run_compose_up(compose_file):
-    threading.Thread(
-        target=subprocess.run,
-        args=(["docker", "compose", "-f", str(compose_file), "up", "-d"],),
-        daemon=True,
-    ).start()
+def run_compose_up(compose_file, icon=None):
+    def _run():
+        try:
+            subprocess.run(
+                ["docker", "compose", "-f", str(compose_file), "up", "-d"],
+                capture_output=True,
+                text=True,
+                timeout=DOCKER_COMPOSE_UP_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            pass
+        if icon is not None:
+            update_tray_menu(icon)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def run_docker_capture(args, check=True):
@@ -266,15 +291,37 @@ def run_docker_capture(args, check=True):
 
 
 def run_compose_pull(config_files, service, working_dir):
+    return run_compose_service_command(
+        config_files,
+        service,
+        working_dir,
+        "pull",
+        DOCKER_COMPOSE_PULL_TIMEOUT_SECONDS,
+    )
+
+
+def run_compose_service_up(config_files, service, working_dir):
+    return run_compose_service_command(
+        config_files,
+        service,
+        working_dir,
+        "up",
+        DOCKER_COMPOSE_UP_TIMEOUT_SECONDS,
+        "-d",
+    )
+
+
+def run_compose_service_command(config_files, service, working_dir, action, timeout, *action_args):
     command = ["docker", "compose"]
     for config_file in config_files:
         command += ["-f", str(config_file)]
-    command += ["pull", service]
+    command += [action, *action_args, service]
     return subprocess.run(
         command,
         cwd=working_dir or None,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
 
 
@@ -325,6 +372,11 @@ def resolve_compose_config_files(config_files, working_dir):
     return tuple(resolved)
 
 
+def normalize_docker_template_value(value):
+    value = value.strip()
+    return "" if value == "<no value>" else value
+
+
 def get_compose_file_states_from_containers():
     result = subprocess.run(
         ["docker", "ps", "-a", "--format", DOCKER_COMPOSE_LABEL_FORMAT],
@@ -362,19 +414,29 @@ def get_compose_file_states_from_containers():
 
 
 def get_compose_pull_targets_for_image(image):
-    result = run_docker_capture(
-        ["docker", "ps", "-a", "--format", DOCKER_IMAGE_COMPOSE_LABEL_FORMAT],
-        check=False,
-    )
+    ids_result = run_docker_capture(["docker", "ps", "-a", "-q"], check=False)
+    container_ids = sorted(output_line_set(ids_result.stdout))
+    if not container_ids:
+        return []
+
+    result = run_docker_capture([
+        "docker",
+        "inspect",
+        "--format",
+        DOCKER_INSPECT_COMPOSE_LABEL_FORMAT,
+        *container_ids,
+    ], check=False)
     targets = []
     seen = set()
 
     for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 3)
-        if len(parts) < 4:
+        parts = line.split("\t", 4)
+        if len(parts) < 5:
             continue
-        container_image, config_files, working_dir, service = (part.strip() for part in parts)
-        if container_image != image or not config_files or not service:
+        config_image, container_image_id, config_files, working_dir, service = (
+            normalize_docker_template_value(part) for part in parts
+        )
+        if image not in {config_image, container_image_id} or not config_files or not service:
             continue
 
         resolved_config_files = resolve_compose_config_files(config_files, working_dir)
@@ -429,11 +491,24 @@ def compose_file_label(compose_file):
     return str(rel)
 
 
-def update_tray_menu(icon):
+def run_pending_tray_menu_update(icon):
+    global tray_menu_update_pending
     try:
         icon.update_menu()
     except Exception:
         pass
+    with tray_menu_update_lock:
+        tray_menu_update_pending = False
+    return GLib.SOURCE_REMOVE
+
+
+def update_tray_menu(icon):
+    global tray_menu_update_pending
+    with tray_menu_update_lock:
+        if tray_menu_update_pending:
+            return
+        tray_menu_update_pending = True
+    GLib.idle_add(run_pending_tray_menu_update, icon)
 
 
 def count_unique_output_lines(output):
@@ -964,7 +1039,7 @@ def poll_compose_start_state(compose_file, icon, row, action):
 
 
 def run_compose_file_from_dialog(compose_file, icon, button):
-    run_compose_up(compose_file)
+    run_compose_up(compose_file, icon)
     button.set_label("Starting")
     button.set_sensitive(False)
     update_tray_menu(icon)
@@ -1216,15 +1291,15 @@ def make_cleanup_cb():
 
 
 def make_start_cb(name):
-    return lambda icon, item: run_docker_action("start", name)
+    return lambda icon, item: run_docker_action("start", name, icon)
 
 
 def make_restart_cb(name):
-    return lambda icon, item: run_docker_action("restart", name)
+    return lambda icon, item: run_docker_action("restart", name, icon)
 
 
 def make_stop_cb(name):
-    return lambda icon, item: run_docker_action("stop", name)
+    return lambda icon, item: run_docker_action("stop", name, icon)
 
 
 def parse_cpu_pct(s):
@@ -1307,8 +1382,17 @@ def trim_stats_file():
     if not STATS_FILE.exists():
         return
     cutoff = time.time() - STATS_TRIM_DAYS * 86400
-    lines = STATS_FILE.read_text().splitlines()
-    kept = [l for l in lines if l.strip() and json.loads(l).get("t", 0) >= cutoff]
+    kept = []
+    for line in STATS_FILE.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            entry = json.loads(stripped)
+        except Exception:
+            continue
+        if entry.get("t", 0) >= cutoff:
+            kept.append(stripped)
     STATS_FILE.write_text("\n".join(kept) + ("\n" if kept else ""))
 
 
@@ -1335,21 +1419,28 @@ def load_stats_history():
 
 
 def get_container_restart_counts():
-    result = run_docker_capture(
-        ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
-        check=False,
-    )
+    ids_result = run_docker_capture(["docker", "ps", "-a", "-q"], check=False)
+    container_ids = sorted(output_line_set(ids_result.stdout))
+    if not container_ids:
+        return {}
+
+    result = run_docker_capture([
+        "docker",
+        "inspect",
+        "--format",
+        "{{.Name}}\t{{.RestartCount}}",
+        *container_ids,
+    ], check=False)
     counts = {}
     for line in result.stdout.strip().splitlines():
         parts = line.split("\t", 1)
         if len(parts) != 2:
             continue
-        name, status = parts
-        match = re.search(r"Restarting|(\d+) restart", status)
-        if match and match.group(1):
-            counts[name.strip()] = int(match.group(1))
-        else:
-            counts[name.strip()] = 0
+        name, restart_count = parts
+        try:
+            counts[name.strip().lstrip("/")] = int(restart_count)
+        except ValueError:
+            counts[name.strip().lstrip("/")] = 0
     return counts
 
 
@@ -1366,9 +1457,10 @@ def get_container_uptimes():
     return uptimes
 
 
-def build_stats_summary():
+def build_stats_summary(current_samples=None):
     history = load_stats_history()
-    current_samples = collect_stats_sample()
+    if current_samples is None:
+        current_samples = collect_stats_sample()
     restarts = get_container_restart_counts()
     uptimes = get_container_uptimes()
     recent_cutoff = time.time() - STATS_CPU_SUSTAINED_WINDOW_SECONDS
@@ -1429,45 +1521,29 @@ def build_stats_summary():
     return summary, system_mem_total
 
 
-def compute_health(summary, system_mem_total, acknowledge_ts=None):
+def compute_health(summary, system_mem_total):
     issues = []
     level = "ok"
-    acknowledge_ts = acknowledge_ts or 0
 
     total_cpu = sum(s["cpu"] for s in summary)
     total_mem = sum(s["mem"] for s in summary)
     mem_pct = (total_mem / system_mem_total * 100) if system_mem_total else 0
 
-    peak_mem_total = sum(s["peak_mem"] for s in summary)
-    peak_mem_pct = (peak_mem_total / system_mem_total * 100) if system_mem_total else 0
-
     for s in summary:
-        if s["restarts"] > 0:
-            level = "critical"
-            issues.append(f"⚠ {s['name']}: {s['restarts']} restart(s)")
         if s.get("recent_cpu_critical_count", 0) >= STATS_CPU_SUSTAINED_SAMPLES:
             level = "critical"
             issues.append(f"⚠ {s['name']}: sustained CPU {s['cpu']:.1f}%")
         elif s.get("recent_cpu_warning_count", 0) >= STATS_CPU_SUSTAINED_SAMPLES and level == "ok":
             level = "warning"
             issues.append(f"↑ {s['name']}: sustained CPU {s['cpu']:.1f}%")
-        elif s["peak_cpu_ts"] > acknowledge_ts:
-            if s["peak_cpu"] >= STATS_CPU_CRITICAL_PCT:
-                level = "critical"
-                ts = f" at {format_ts(s['peak_cpu_ts'])}" if s["peak_cpu_ts"] else ""
-                issues.append(f"⚠ {s['name']}: peak CPU {s['peak_cpu']:.1f}%{ts}")
-            elif s["peak_cpu"] >= STATS_CPU_WARNING_PCT and level == "ok":
-                level = "warning"
-                ts = f" at {format_ts(s['peak_cpu_ts'])}" if s["peak_cpu_ts"] else ""
-                issues.append(f"↑ {s['name']}: peak CPU {s['peak_cpu']:.1f}%{ts}")
 
-    if peak_mem_pct >= 85:
+    if mem_pct >= 85:
         if level != "critical":
             level = "critical"
-        issues.append(f"⚠ Peak RAM: {format_bytes(peak_mem_total)} / {format_bytes(system_mem_total)} ({peak_mem_pct:.0f}%)")
-    elif peak_mem_pct >= 70 and level == "ok":
+        issues.append(f"⚠ RAM: {format_bytes(total_mem)} / {format_bytes(system_mem_total)} ({mem_pct:.0f}%)")
+    elif mem_pct >= 70 and level == "ok":
         level = "warning"
-        issues.append(f"↑ Peak RAM: {format_bytes(peak_mem_total)} / {format_bytes(system_mem_total)} ({peak_mem_pct:.0f}%)")
+        issues.append(f"↑ RAM: {format_bytes(total_mem)} / {format_bytes(system_mem_total)} ({mem_pct:.0f}%)")
 
     return level, total_cpu, total_mem, system_mem_total, mem_pct, issues
 
@@ -1478,11 +1554,10 @@ def poll_container_stats(icon):
             samples = collect_stats_sample()
             if samples:
                 append_stats_to_file(samples)
-                summary, system_mem_total = build_stats_summary()
+                summary, system_mem_total = build_stats_summary(samples)
                 level, *_ = compute_health(
                     summary,
                     system_mem_total,
-                    acknowledge_ts=container_health_state["ack_ts"],
                 )
                 if level != container_health_state["level"]:
                     container_health_state["level"] = level
@@ -1586,7 +1661,6 @@ def show_container_stats(summary, system_mem_total, error):
         level, total_cpu, total_mem, sys_mem, mem_pct, issues = compute_health(
             summary,
             system_mem_total,
-            acknowledge_ts=container_health_state["ack_ts"],
         )
 
         badge = {"ok": "🟢 Healthy", "warning": "🟡 Watch", "critical": "🔴 Action needed"}[level]
@@ -1638,7 +1712,7 @@ def show_container_stats(summary, system_mem_total, error):
         grid.set_row_spacing(6)
         grid.set_border_width(4)
 
-        headers = ["Container", "Uptime", "CPU", "Peak CPU", "RAM", "Peak RAM", "Restarts"]
+        headers = ["Container", "CPU", "Peak CPU", "RAM", "Peak RAM", "Restarts", "Uptime"]
         for col, text in enumerate(headers):
             lbl = make_stats_header_label(text)
             if col == 0:
@@ -1658,22 +1732,23 @@ def show_container_stats(summary, system_mem_total, error):
             name_lbl.set_hexpand(True)
             grid.attach(name_lbl, 0, row, 1, 1)
 
-            grid.attach(make_stats_cell(s["uptime"], dim=True), 1, row, 1, 1)
-            grid.attach(make_stats_cell(f"{s['cpu']:.1f}%"), 2, row, 1, 1)
+            grid.attach(make_stats_cell(f"{s['cpu']:.1f}%"), 1, row, 1, 1)
 
             peak_cpu_ts = f" ({format_ts(s['peak_cpu_ts'])})" if s["peak_cpu_ts"] else ""
             peak_cpu_text = f"{s['peak_cpu']:.1f}%{peak_cpu_ts}"
-            grid.attach(make_stats_cell(peak_cpu_text, warning=has_spike, dim=bool(peak_cpu_ts)), 3, row, 1, 1)
+            grid.attach(make_stats_cell(peak_cpu_text, warning=has_spike, dim=bool(peak_cpu_ts)), 2, row, 1, 1)
 
             mem_used = s["mem_str"].split("/")[0].strip() if "/" in s["mem_str"] else s["mem_str"]
-            grid.attach(make_stats_cell(mem_used), 4, row, 1, 1)
+            grid.attach(make_stats_cell(mem_used), 3, row, 1, 1)
 
             peak_mem_ts = f" ({format_ts(s['peak_mem_ts'])})" if s["peak_mem_ts"] else ""
             peak_mem_text = f"{format_bytes(s['peak_mem'])}{peak_mem_ts}"
-            grid.attach(make_stats_cell(peak_mem_text, dim=bool(peak_mem_ts)), 5, row, 1, 1)
+            grid.attach(make_stats_cell(peak_mem_text, dim=bool(peak_mem_ts)), 4, row, 1, 1)
 
-            restarts_text = str(s["restarts"]) if s["restarts"] > 0 else "—"
-            grid.attach(make_stats_cell(restarts_text, warning=has_restarts), 6, row, 1, 1)
+            restarts_text = str(s["restarts"]) if s["restarts"] > 0 else "-"
+            grid.attach(make_stats_cell(restarts_text, warning=has_restarts), 5, row, 1, 1)
+
+            grid.attach(make_stats_cell(s["uptime"], dim=True), 6, row, 1, 1)
 
         scroller.add(grid)
         box.pack_start(scroller, True, True, 0)
@@ -1710,7 +1785,6 @@ def start_container_stats_load():
 
 
 def open_container_stats_dialog(icon, item):
-    container_health_state["ack_ts"] = time.time()
     container_health_state["level"] = "ok"
     update_tray_menu(icon)
     ensure_container_stats_dialog()
@@ -1750,6 +1824,32 @@ def get_local_image_id(image):
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def get_container_image_refs():
+    ids_result = run_docker_capture(["docker", "ps", "-a", "-q"], check=False)
+    container_ids = sorted(output_line_set(ids_result.stdout))
+    if not container_ids:
+        return []
+
+    result = run_docker_capture([
+        "docker",
+        "inspect",
+        "--format",
+        "{{.Config.Image}}\t{{.Image}}",
+        *container_ids,
+    ], check=False)
+    refs = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        image, container_image_id = parts
+        image = image.strip()
+        container_image_id = container_image_id.strip()
+        if image:
+            refs.append((image, container_image_id))
+    return refs
+
+
 def get_remote_config_digest(image):
     result = subprocess.run(
         ["docker", "manifest", "inspect", "--verbose", image],
@@ -1767,13 +1867,21 @@ def get_remote_config_digest(image):
         for entry in data:
             p = entry.get("Descriptor", {}).get("platform", {})
             if p.get("architecture") == arch and p.get("os") == "linux":
-                return entry.get("SchemaV2Manifest", {}).get("config", {}).get("digest")
+                return get_manifest_config_digest(entry)
         return None
-    return data.get("SchemaV2Manifest", {}).get("config", {}).get("digest")
+    return get_manifest_config_digest(data)
+
+
+def get_manifest_config_digest(manifest):
+    for key in ("SchemaV2Manifest", "OCIManifest"):
+        digest = manifest.get(key, {}).get("config", {}).get("digest")
+        if digest:
+            return digest
+    return manifest.get("config", {}).get("digest")
 
 
 def is_unpinned_image(image):
-    if "@" in image:
+    if "@" in image or is_image_id_reference(image):
         return False
     tag = image.rsplit("/", 1)[-1]
     if ":" not in tag:
@@ -1781,38 +1889,69 @@ def is_unpinned_image(image):
     return tag.rsplit(":", 1)[1] == "latest"
 
 
+def is_image_id_reference(image):
+    image = image.strip()
+    if image.startswith("sha256:"):
+        image = image.removeprefix("sha256:")
+    return bool(re.fullmatch(r"[0-9a-fA-F]{12,64}", image))
+
+
 def check_image_updates():
-    result = run_docker_capture(["docker", "ps", "-a", "--format", "{{.Image}}"], check=False)
+    container_refs = get_container_image_refs()
     images = sorted({
-        line.strip() for line in result.stdout.splitlines()
-        if line.strip() and is_unpinned_image(line.strip())
+        image for image, _container_image_id in container_refs
+        if is_unpinned_image(image)
     })
-    return [
+    stale_running_images = {
+        image for image, container_image_id in container_refs
+        if is_unpinned_image(image)
+        and container_image_id
+        and (local := get_local_image_id(image))
+        and local != container_image_id
+    }
+    remote_updates = {
         image for image in images
         if (local := get_local_image_id(image))
         and (remote := get_remote_config_digest(image))
         and local != remote
-    ]
+    }
+    return sorted(remote_updates | stale_running_images)
+
+
+def get_update_state_snapshot():
+    with update_check_lock:
+        return (
+            update_check_state["engine_update"],
+            list(update_check_state["image_updates"]),
+        )
+
+
+def set_update_state(icon, engine_update, image_updates):
+    with update_check_lock:
+        changed = (
+            engine_update != update_check_state["engine_update"]
+            or image_updates != update_check_state["image_updates"]
+        )
+        update_check_state["engine_update"] = engine_update
+        update_check_state["image_updates"] = image_updates
+    if changed:
+        update_tray_menu(icon)
+        if updates_dialog["window"] is not None:
+            show_updates_dialog(icon)
+    return GLib.SOURCE_REMOVE
 
 
 def run_update_check(icon):
+    previous_engine_update, previous_image_updates = get_update_state_snapshot()
     try:
         engine_update = check_engine_update()
     except Exception:
-        engine_update = update_check_state["engine_update"]
+        engine_update = previous_engine_update
     try:
         image_updates = check_image_updates()
     except Exception:
-        image_updates = update_check_state["image_updates"]
-
-    changed = (
-        engine_update != update_check_state["engine_update"]
-        or image_updates != update_check_state["image_updates"]
-    )
-    update_check_state["engine_update"] = engine_update
-    update_check_state["image_updates"] = image_updates
-    if changed:
-        update_tray_menu(icon)
+        image_updates = previous_image_updates
+    GLib.idle_add(set_update_state, icon, engine_update, image_updates)
 
 
 def poll_updates(icon):
@@ -1825,6 +1964,8 @@ def poll_updates(icon):
 def clear_updates_dialog():
     updates_dialog["window"] = None
     updates_dialog["content"] = None
+    if not updates_dialog["pulling_images"]:
+        updates_dialog["status"] = ""
     return GLib.SOURCE_REMOVE
 
 
@@ -1869,11 +2010,12 @@ def start_docker_engine_upgrade(button, icon):
     button.set_sensitive(False)
 
     def _upgrade():
-        result = docker_tray_platform.run_engine_upgrade(update_check_state["engine_update"])
+        engine_update, _image_updates = get_update_state_snapshot()
+        result = docker_tray_platform.run_engine_upgrade(engine_update)
         def _done():
             if result.returncode == 0:
-                update_check_state["engine_update"] = docker_tray_platform.EngineUpdate(False)
-                update_tray_menu(icon)
+                _current_engine_update, image_updates = get_update_state_snapshot()
+                set_update_state(icon, docker_tray_platform.EngineUpdate(False), image_updates)
                 destroy_updates_dialog()
                 threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
             else:
@@ -1885,45 +2027,85 @@ def start_docker_engine_upgrade(button, icon):
     threading.Thread(target=_upgrade, daemon=True).start()
 
 
-def finish_image_pull(icon, image):
-    update_check_state["image_updates"] = [
-        update_image for update_image in update_check_state["image_updates"]
-        if update_image != image
-    ]
-    update_tray_menu(icon)
-    if update_check_state["engine_update"].available or update_check_state["image_updates"]:
+def finish_image_pull(icon, image, service_count):
+    updates_dialog["pulling_images"].discard(image)
+    engine_update, image_updates = get_update_state_snapshot()
+    image_updates = [update_image for update_image in image_updates if update_image != image]
+    set_update_state(icon, engine_update, image_updates)
+    updates_dialog["status"] = f"Finished pulling and restarting {image} for {service_count} compose service(s)."
+    if updates_dialog["window"] is not None:
         show_updates_dialog(icon)
-    else:
-        destroy_updates_dialog()
     threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
     return GLib.SOURCE_REMOVE
 
 
-def fail_image_pull(button, label):
-    if button.get_parent() is None:
-        return GLib.SOURCE_REMOVE
-    button.set_label(label)
-    button.set_sensitive(True)
+def fail_image_pull(icon, image, status):
+    updates_dialog["pulling_images"].discard(image)
+    updates_dialog["status"] = status
+    if updates_dialog["window"] is not None:
+        show_updates_dialog(icon)
     return GLib.SOURCE_REMOVE
 
 
 def start_image_compose_pull(button, icon, image):
-    button.set_label("Pulling...")
-    button.set_sensitive(False)
+    if updates_dialog["pulling_images"]:
+        return
+    updates_dialog["status"] = f"Pulling {image}..."
+    updates_dialog["pulling_images"].add(image)
+    show_updates_dialog(icon)
 
     def _pull():
         targets = get_compose_pull_targets_for_image(image)
         if not targets:
-            GLib.idle_add(fail_image_pull, button, "No compose service")
+            GLib.idle_add(
+                fail_image_pull,
+                icon,
+                image,
+                f"No compose service was found for {image}.",
+            )
             return
 
         for config_files, service, working_dir in targets:
-            result = run_compose_pull(config_files, service, working_dir)
+            try:
+                result = run_compose_pull(config_files, service, working_dir)
+            except subprocess.TimeoutExpired:
+                GLib.idle_add(
+                    fail_image_pull,
+                    icon,
+                    image,
+                    f"Pull timed out for {image}.",
+                )
+                return
             if result.returncode != 0:
-                GLib.idle_add(fail_image_pull, button, "Pull failed")
+                detail = result.stderr.strip() or result.stdout.strip() or "docker compose pull failed"
+                GLib.idle_add(
+                    fail_image_pull,
+                    icon,
+                    image,
+                    f"Pull failed for {image}: {detail}",
+                )
+                return
+            try:
+                result = run_compose_service_up(config_files, service, working_dir)
+            except subprocess.TimeoutExpired:
+                GLib.idle_add(
+                    fail_image_pull,
+                    icon,
+                    image,
+                    f"Pulled {image}, but restarting compose service {service} timed out.",
+                )
+                return
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip() or "docker compose up failed"
+                GLib.idle_add(
+                    fail_image_pull,
+                    icon,
+                    image,
+                    f"Pulled {image}, but restarting compose service {service} failed: {detail}",
+                )
                 return
 
-        GLib.idle_add(finish_image_pull, icon, image)
+        GLib.idle_add(finish_image_pull, icon, image, len(targets))
 
     threading.Thread(target=_pull, daemon=True).start()
 
@@ -1932,7 +2114,7 @@ def show_updates_dialog(icon):
     ensure_updates_dialog()
     box = make_dialog_box()
 
-    engine_update = update_check_state["engine_update"]
+    engine_update, image_updates = get_update_state_snapshot()
     if engine_update.available:
         engine_label = Gtk.Label(label=f"{engine_update.package_name} update available")
         engine_label.set_xalign(0)
@@ -1950,24 +2132,45 @@ def show_updates_dialog(icon):
             detail.set_xalign(0)
             box.pack_start(detail, False, False, 0)
 
-    if update_check_state["image_updates"]:
+    if image_updates:
         images_label = Gtk.Label(label="Image updates available:")
         images_label.set_xalign(0)
         box.pack_start(images_label, False, False, 0)
-        for image in update_check_state["image_updates"]:
+        pull_in_progress = bool(updates_dialog["pulling_images"])
+        for image in image_updates:
+            is_pulling = image in updates_dialog["pulling_images"]
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             image_label = Gtk.Label(label=image)
             image_label.set_xalign(0)
             image_label.set_hexpand(True)
             image_label.set_line_wrap(True)
-            pull_button = Gtk.Button(label="Compose pull")
-            pull_button.connect(
-                "clicked",
-                lambda button, pull_image=image: start_image_compose_pull(button, icon, pull_image),
-            )
+            pull_button = Gtk.Button(label="Pulling" if is_pulling else "Pull + restart")
+            pull_button.set_sensitive(not pull_in_progress)
+            if not pull_in_progress:
+                pull_button.connect(
+                    "clicked",
+                    lambda button, pull_image=image: start_image_compose_pull(button, icon, pull_image),
+                )
             row.pack_start(image_label, True, True, 0)
             row.pack_start(pull_button, False, False, 0)
             box.pack_start(row, False, False, 0)
+
+    if updates_dialog["status"]:
+        status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        if updates_dialog["status"].startswith("Pulling "):
+            spinner = Gtk.Spinner()
+            spinner.start()
+            status_row.pack_start(spinner, False, False, 0)
+        status_label = Gtk.Label(label=updates_dialog["status"])
+        status_label.set_xalign(0)
+        status_label.set_line_wrap(True)
+        status_row.pack_start(status_label, True, True, 0)
+        box.pack_start(status_row, False, False, 0)
+
+    if not engine_update.available and not image_updates:
+        done_label = Gtk.Label(label="No image updates pending.")
+        done_label.set_xalign(0)
+        box.pack_start(done_label, False, False, 0)
 
     close_button = Gtk.Button(label="Close")
     close_button.connect("clicked", lambda b: destroy_updates_dialog())
@@ -2000,14 +2203,13 @@ def get_settings_items(pystray):
 
 def get_menu_items(pystray):
     items = []
+    engine_update, image_updates = get_update_state_snapshot()
     if container_health_state["level"] == "critical":
         items.append(pystray.MenuItem("🔴 Container issue detected", open_container_stats_dialog))
     elif container_health_state["level"] == "warning":
         items.append(pystray.MenuItem("🟡 Container warning", open_container_stats_dialog))
-    if update_check_state["engine_update"].available:
-        items.append(pystray.MenuItem("⬆️ Docker update available", open_updates_dialog))
-    for image in update_check_state["image_updates"]:
-        items.append(pystray.MenuItem(f"⬆️ {image} update available", open_updates_dialog))
+    if engine_update.available or image_updates:
+        items.append(pystray.MenuItem("⬆️ Updates available", open_updates_dialog))
     if items:
         items.append(pystray.Menu.SEPARATOR)
     if not is_docker_installed():
