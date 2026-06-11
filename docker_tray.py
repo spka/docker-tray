@@ -19,7 +19,7 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.1.24"
+APP_VERSION = "0.1.25"
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Names}}\t"
@@ -34,6 +34,15 @@ DOCKER_INSPECT_COMPOSE_LABEL_FORMAT = (
     "{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}\t"
     "{{index .Config.Labels \"com.docker.compose.service\"}}"
 )
+DOCKER_INSPECT_COMPOSE_STATE_FORMAT = (
+    "{{.Config.Image}}\t"
+    "{{.Image}}\t"
+    "{{.State.Running}}\t"
+    "{{if .State.Health}}{{.State.Health.Status}}{{end}}\t"
+    "{{index .Config.Labels \"com.docker.compose.project.config_files\"}}\t"
+    "{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}\t"
+    "{{index .Config.Labels \"com.docker.compose.service\"}}"
+)
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
 COMPOSE_START_POLL_SECONDS = 2
@@ -43,6 +52,8 @@ DOCKER_CMD_TIMEOUT_SECONDS = 15
 DOCKER_MANIFEST_TIMEOUT_SECONDS = 30
 DOCKER_COMPOSE_PULL_TIMEOUT_SECONDS = 10 * 60
 DOCKER_COMPOSE_UP_TIMEOUT_SECONDS = 3 * 60
+DOCKER_COMPOSE_RESTART_SETTLE_SECONDS = 60
+DOCKER_COMPOSE_RESTART_POLL_SECONDS = 2
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
@@ -450,6 +461,73 @@ def get_compose_pull_targets_for_image(image):
         targets.append((resolved_config_files, service, working_dir))
 
     return targets
+
+
+def get_compose_service_states(config_files, service, working_dir):
+    ids_result = run_docker_capture(["docker", "ps", "-a", "-q"], check=False)
+    container_ids = sorted(output_line_set(ids_result.stdout))
+    if not container_ids:
+        return []
+
+    expected_config_files = tuple(normalize_compose_path(path) for path in config_files)
+    result = run_docker_capture([
+        "docker",
+        "inspect",
+        "--format",
+        DOCKER_INSPECT_COMPOSE_STATE_FORMAT,
+        *container_ids,
+    ], check=False)
+    states = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 6)
+        if len(parts) < 7:
+            continue
+        (
+            config_image,
+            container_image_id,
+            running,
+            health,
+            container_config_files,
+            container_working_dir,
+            container_service,
+        ) = (normalize_docker_template_value(part) for part in parts)
+        if (
+            resolve_compose_config_files(container_config_files, container_working_dir) != expected_config_files
+            or container_working_dir != working_dir
+            or container_service != service
+        ):
+            continue
+        states.append({
+            "config_image": config_image,
+            "container_image_id": container_image_id,
+            "running": running == "true",
+            "health": health,
+        })
+    return states
+
+
+def compose_service_state_is_ready(states):
+    if not states:
+        return False
+    for state in states:
+        if not state["running"]:
+            return False
+        health = state["health"]
+        if health and health != "healthy":
+            return False
+        local_image_id = get_local_image_id(state["config_image"])
+        if local_image_id and state["container_image_id"] != local_image_id:
+            return False
+    return True
+
+
+def wait_for_compose_service_ready(config_files, service, working_dir):
+    deadline = time.time() + DOCKER_COMPOSE_RESTART_SETTLE_SECONDS
+    while time.time() < deadline:
+        if compose_service_state_is_ready(get_compose_service_states(config_files, service, working_dir)):
+            return True
+        time.sleep(DOCKER_COMPOSE_RESTART_POLL_SECONDS)
+    return False
 
 
 def get_scanned_compose_files_with_states(root):
@@ -2039,6 +2117,13 @@ def finish_image_pull(icon, image, service_count):
     return GLib.SOURCE_REMOVE
 
 
+def set_image_pull_status(icon, status):
+    updates_dialog["status"] = status
+    if updates_dialog["window"] is not None:
+        show_updates_dialog(icon)
+    return GLib.SOURCE_REMOVE
+
+
 def fail_image_pull(icon, image, status):
     updates_dialog["pulling_images"].discard(image)
     updates_dialog["status"] = status
@@ -2066,6 +2151,7 @@ def start_image_compose_pull(button, icon, image):
             return
 
         for config_files, service, working_dir in targets:
+            GLib.idle_add(set_image_pull_status, icon, f"Pulling {image} for {service}...")
             try:
                 result = run_compose_pull(config_files, service, working_dir)
             except subprocess.TimeoutExpired:
@@ -2085,6 +2171,7 @@ def start_image_compose_pull(button, icon, image):
                     f"Pull failed for {image}: {detail}",
                 )
                 return
+            GLib.idle_add(set_image_pull_status, icon, f"Restarting {service}...")
             try:
                 result = run_compose_service_up(config_files, service, working_dir)
             except subprocess.TimeoutExpired:
@@ -2102,6 +2189,15 @@ def start_image_compose_pull(button, icon, image):
                     icon,
                     image,
                     f"Pulled {image}, but restarting compose service {service} failed: {detail}",
+                )
+                return
+            GLib.idle_add(set_image_pull_status, icon, f"Waiting for {service} to finish restarting...")
+            if not wait_for_compose_service_ready(config_files, service, working_dir):
+                GLib.idle_add(
+                    fail_image_pull,
+                    icon,
+                    image,
+                    f"Restarted {service}, but it was not ready after {DOCKER_COMPOSE_RESTART_SETTLE_SECONDS} seconds.",
                 )
                 return
 
@@ -2157,7 +2253,7 @@ def show_updates_dialog(icon):
 
     if updates_dialog["status"]:
         status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        if updates_dialog["status"].startswith("Pulling "):
+        if updates_dialog["status"].startswith(("Pulling ", "Restarting ", "Waiting ")):
             spinner = Gtk.Spinner()
             spinner.start()
             status_row.pack_start(spinner, False, False, 0)
