@@ -96,6 +96,60 @@ class UpdateWorkerTests(unittest.TestCase):
             timeout=123,
         )
 
+    def test_image_update_check_accepts_all_registry_tags(self):
+        for image in (
+            "example",
+            "example:latest",
+            "example:15",
+            "example:v3",
+            "example:15.2.2",
+            "registry.example:5000/team/example:stable",
+        ):
+            with self.subTest(image=image):
+                self.assertTrue(docker_tray.is_checkable_image(image))
+
+    def test_image_update_check_rejects_digest_pins_and_image_ids(self):
+        for image in (
+            "example@sha256:" + "1" * 64,
+            "sha256:" + "2" * 64,
+            "3" * 12,
+        ):
+            with self.subTest(image=image):
+                self.assertFalse(docker_tray.is_checkable_image(image))
+
+    @mock.patch.object(docker_tray, "get_remote_config_digest")
+    @mock.patch.object(docker_tray, "get_local_image_id")
+    @mock.patch.object(docker_tray, "get_container_image_refs")
+    def test_image_update_check_includes_moving_major_tags(
+        self,
+        get_container_refs,
+        get_local_image_id,
+        get_remote_config_digest,
+    ):
+        digest_pin = "pinned@sha256:" + "4" * 64
+        get_container_refs.return_value = [
+            ("wg-easy:15", "sha256:old-wg"),
+            ("immich:v3", "sha256:old-immich"),
+            ("fixed:15.2.2", "sha256:fixed"),
+            (digest_pin, "sha256:pinned"),
+        ]
+        get_local_image_id.side_effect = {
+            "wg-easy:15": "sha256:old-wg",
+            "immich:v3": "sha256:old-immich",
+            "fixed:15.2.2": "sha256:fixed",
+        }.get
+        get_remote_config_digest.side_effect = {
+            "wg-easy:15": "sha256:new-wg",
+            "immich:v3": "sha256:new-immich",
+            "fixed:15.2.2": "sha256:fixed",
+        }.get
+
+        updates = docker_tray.check_image_updates()
+
+        self.assertEqual(["immich:v3", "wg-easy:15"], updates)
+        self.assertNotIn(mock.call(digest_pin), get_local_image_id.call_args_list)
+        self.assertNotIn(mock.call(digest_pin), get_remote_config_digest.call_args_list)
+
     @mock.patch.object(docker_tray, "run_docker_capture")
     @mock.patch.object(docker_tray, "get_container_image_ids")
     def test_replaced_image_cleanup_skips_images_still_used_by_containers(

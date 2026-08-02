@@ -2162,13 +2162,10 @@ def get_manifest_config_digest(manifest):
     return manifest.get("config", {}).get("digest")
 
 
-def is_unpinned_image(image):
+def is_checkable_image(image):
     if "@" in image or is_image_id_reference(image):
         return False
-    tag = image.rsplit("/", 1)[-1]
-    if ":" not in tag:
-        return True
-    return tag.rsplit(":", 1)[1] == "latest"
+    return True
 
 
 def is_image_id_reference(image):
@@ -2215,11 +2212,11 @@ def check_image_updates():
     container_refs = get_container_image_refs()
     images = sorted({
         image for image, _container_image_id in container_refs
-        if is_unpinned_image(image)
+        if is_checkable_image(image)
     })
     stale_running_images = {
         image for image, container_image_id in container_refs
-        if is_unpinned_image(image)
+        if is_checkable_image(image)
         and container_image_id
         and (local := get_local_image_id(image))
         and local != container_image_id
