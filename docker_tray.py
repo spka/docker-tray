@@ -1440,6 +1440,9 @@ def collect_stats_sample():
          "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"],
         check=False,
     )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "docker stats failed"
+        raise RuntimeError(format_docker_error(message))
     ts = time.time()
     samples = []
     for line in result.stdout.strip().splitlines():
@@ -1731,23 +1734,31 @@ def compute_health(summary, system_mem_total):
     return level, total_cpu, total_mem, system_mem_total, mem_pct, issues
 
 
+def set_container_health_level(icon, level):
+    if level != container_health_state["level"]:
+        container_health_state["level"] = level
+        update_tray_menu(icon)
+
+
+def poll_container_stats_once(icon):
+    try:
+        samples = collect_stats_sample()
+        if not samples:
+            set_container_health_level(icon, "idle")
+            return
+
+        summary, system_mem_total = build_stats_summary(samples)
+        level, *_ = compute_health(summary, system_mem_total)
+        append_stats_to_file(samples)
+        trim_stats_file_if_needed()
+        set_container_health_level(icon, level)
+    except Exception:
+        set_container_health_level(icon, "unknown")
+
+
 def poll_container_stats(icon):
     while True:
-        try:
-            samples = collect_stats_sample()
-            if samples:
-                summary, system_mem_total = build_stats_summary(samples)
-                level, *_ = compute_health(
-                    summary,
-                    system_mem_total,
-                )
-                append_stats_to_file(samples)
-                trim_stats_file_if_needed()
-                if level != container_health_state["level"]:
-                    container_health_state["level"] = level
-                    update_tray_menu(icon)
-        except Exception:
-            pass
+        poll_container_stats_once(icon)
         time.sleep(STATS_POLL_INTERVAL_SECONDS)
 
 
@@ -1969,8 +1980,6 @@ def start_container_stats_load():
 
 
 def open_container_stats_dialog(icon, item):
-    container_health_state["level"] = "ok"
-    update_tray_menu(icon)
     ensure_container_stats_dialog()
     start_container_stats_load()
 
@@ -2452,6 +2461,8 @@ def get_menu_items(pystray):
         items.append(pystray.MenuItem("🔴 Container issue detected", open_container_stats_dialog))
     elif container_health_state["level"] == "warning":
         items.append(pystray.MenuItem("🟡 Container warning", open_container_stats_dialog))
+    elif container_health_state["level"] == "unknown" and is_docker_installed():
+        items.append(pystray.MenuItem("⚪ Container stats unavailable", open_container_stats_dialog))
     if engine_update.available or image_updates:
         items.append(pystray.MenuItem("⬆️ Updates available", open_updates_dialog))
     if items:
