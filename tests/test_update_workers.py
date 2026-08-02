@@ -173,7 +173,89 @@ class UpdateWorkerTests(unittest.TestCase):
         docker_tray.run_image_compose_pull(icon, "example:latest")
 
         remove_old_images.assert_called_once_with({old_image})
-        finish_pull.assert_called_once_with(icon, "example:latest", 1, 1, "")
+        finish_pull.assert_called_once_with(icon, "example:latest", 1, 1, "", True)
+
+    @mock.patch.object(docker_tray, "show_updates_dialog")
+    @mock.patch.object(docker_tray, "run_update_check")
+    @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)
+    @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
+    @mock.patch.object(docker_tray, "run_image_compose_pull_safely")
+    def test_update_all_processes_images_sequentially_and_summarizes_success(
+        self,
+        run_image_update,
+        _idle_add,
+        run_update_check,
+        _show_dialog,
+    ):
+        images = ["one:latest", "two:latest"]
+        docker_tray.update_check_state["image_updates"] = images
+        run_image_update.side_effect = [
+            (True, "", 1, ""),
+            (True, "", 2, ""),
+        ]
+        icon = mock.Mock()
+
+        docker_tray.start_all_image_compose_pulls(icon)
+
+        self.assertEqual(
+            [
+                mock.call(
+                    icon,
+                    "one:latest",
+                    start_recheck=False,
+                    schedule_completion=False,
+                ),
+                mock.call(
+                    icon,
+                    "two:latest",
+                    start_recheck=False,
+                    schedule_completion=False,
+                ),
+            ],
+            run_image_update.call_args_list,
+        )
+        self.assertEqual(set(), docker_tray.updates_dialog["pulling_images"])
+        self.assertEqual(
+            "Updated and cleaned up all 2 images. Removed 3 replaced images.",
+            docker_tray.updates_dialog["status"],
+        )
+        self.assertEqual([], docker_tray.get_update_state_snapshot()[1])
+        run_update_check.assert_called_once_with(icon)
+
+    @mock.patch.object(docker_tray, "show_updates_dialog")
+    @mock.patch.object(docker_tray, "run_update_check")
+    @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)
+    @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
+    @mock.patch.object(docker_tray, "run_image_compose_pull_safely")
+    def test_update_all_continues_after_an_image_failure(
+        self,
+        run_image_update,
+        _idle_add,
+        _run_update_check,
+        _show_dialog,
+    ):
+        docker_tray.update_check_state["image_updates"] = ["broken:latest", "working:latest"]
+        run_image_update.side_effect = [
+            (False, "Pull failed for broken:latest", 0, ""),
+            (True, "", 1, ""),
+        ]
+
+        docker_tray.start_all_image_compose_pulls(mock.Mock())
+
+        self.assertEqual(2, run_image_update.call_count)
+        self.assertIn("1 of 2 images updated", docker_tray.updates_dialog["status"])
+        self.assertIn("Pull failed for broken:latest", docker_tray.updates_dialog["status"])
+        self.assertEqual(["broken:latest"], docker_tray.get_update_state_snapshot()[1])
+
+    @mock.patch.object(docker_tray, "show_updates_dialog")
+    @mock.patch.object(docker_tray.threading, "Thread")
+    def test_update_all_does_not_start_while_an_update_is_running(self, thread, show_dialog):
+        docker_tray.updates_dialog["pulling_images"] = {"already-running:latest"}
+
+        docker_tray.start_all_image_compose_pulls(mock.Mock())
+
+        thread.assert_not_called()
+        show_dialog.assert_not_called()
 
 
 if __name__ == "__main__":

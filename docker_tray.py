@@ -2320,7 +2320,14 @@ def finish_docker_engine_upgrade(icon, result, error):
     return GLib.SOURCE_REMOVE
 
 
-def finish_image_pull(icon, image, service_count, removed_image_count=0, cleanup_error=""):
+def finish_image_pull(
+    icon,
+    image,
+    service_count,
+    removed_image_count=0,
+    cleanup_error="",
+    start_recheck=True,
+):
     updates_dialog["pulling_images"].discard(image)
     engine_update, image_updates = get_update_state_snapshot()
     image_updates = [update_image for update_image in image_updates if update_image != image]
@@ -2334,7 +2341,8 @@ def finish_image_pull(icon, image, service_count, removed_image_count=0, cleanup
     updates_dialog["status"] = status
     if updates_dialog["window"] is not None:
         show_updates_dialog(icon)
-    threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
+    if start_recheck:
+        threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
     return GLib.SOURCE_REMOVE
 
 
@@ -2353,6 +2361,35 @@ def fail_image_pull(icon, image, status):
     return GLib.SOURCE_REMOVE
 
 
+def schedule_image_pull_failure(icon, image, status, schedule_completion=True):
+    if schedule_completion:
+        GLib.idle_add(fail_image_pull, icon, image, status)
+    return False, status, 0, ""
+
+
+def run_image_compose_pull_safely(
+    icon,
+    image,
+    start_recheck=True,
+    schedule_completion=True,
+):
+    try:
+        return run_image_compose_pull(
+            icon,
+            image,
+            start_recheck=start_recheck,
+            schedule_completion=schedule_completion,
+        )
+    except Exception as error:
+        status = f"Unexpected failure while updating {image}: {type(error).__name__}: {error}"
+        return schedule_image_pull_failure(
+            icon,
+            image,
+            status,
+            schedule_completion=schedule_completion,
+        )
+
+
 def start_image_compose_pull(button, icon, image):
     if updates_dialog["pulling_images"]:
         return
@@ -2361,81 +2398,162 @@ def start_image_compose_pull(button, icon, image):
     show_updates_dialog(icon)
 
     def _pull():
-        try:
-            run_image_compose_pull(icon, image)
-        except Exception as error:
-            GLib.idle_add(
-                fail_image_pull,
-                icon,
-                image,
-                f"Unexpected failure while updating {image}: {type(error).__name__}: {error}",
-            )
+        run_image_compose_pull_safely(icon, image)
 
     threading.Thread(target=_pull, daemon=True).start()
 
 
-def run_image_compose_pull(icon, image):
+def finish_all_image_pulls(
+    icon,
+    images,
+    successful_images,
+    removed_image_count,
+    errors,
+    cleanup_errors,
+):
+    total_count = len(images)
+    success_count = len(successful_images)
+    updates_dialog["pulling_images"].clear()
+    engine_update, image_updates = get_update_state_snapshot()
+    successful_images = set(successful_images)
+    remaining_updates = [image for image in image_updates if image not in successful_images]
+    set_update_state(icon, engine_update, remaining_updates)
+    if errors:
+        detail = "; ".join(errors)
+        if len(detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
+            detail = detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
+        updates_dialog["status"] = (
+            f"Batch finished: {success_count} of {total_count} images updated. "
+            f"Failures: {detail}"
+        )
+    else:
+        image_noun = "image" if total_count == 1 else "images"
+        updates_dialog["status"] = f"Updated and cleaned up all {total_count} {image_noun}."
+        if removed_image_count:
+            removed_noun = "image" if removed_image_count == 1 else "images"
+            updates_dialog["status"] += f" Removed {removed_image_count} replaced {removed_noun}."
+    if cleanup_errors:
+        cleanup_detail = "; ".join(cleanup_errors)
+        if len(cleanup_detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
+            cleanup_detail = cleanup_detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
+        updates_dialog["status"] += f" Cleanup warnings: {cleanup_detail}"
+    if updates_dialog["window"] is not None:
+        show_updates_dialog(icon)
+    threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
+    return GLib.SOURCE_REMOVE
+
+
+def start_all_image_compose_pulls(icon):
+    if updates_dialog["pulling_images"]:
+        return
+    _engine_update, image_updates = get_update_state_snapshot()
+    if not image_updates:
+        return
+
+    images = list(image_updates)
+    updates_dialog["pulling_images"].update(images)
+    updates_dialog["status"] = f"Updating 1 of {len(images)} images..."
+    show_updates_dialog(icon)
+
+    def _pull_all():
+        removed_image_count = 0
+        errors = []
+        cleanup_errors = []
+        successful_images = []
+        for index, image in enumerate(images, start=1):
+            GLib.idle_add(
+                set_image_pull_status,
+                icon,
+                f"Updating {index} of {len(images)}: {image}...",
+            )
+            success, error, removed_count, cleanup_error = run_image_compose_pull_safely(
+                icon,
+                image,
+                start_recheck=False,
+                schedule_completion=False,
+            )
+            if success:
+                successful_images.append(image)
+                removed_image_count += removed_count
+                if cleanup_error:
+                    cleanup_errors.append(f"{image}: {cleanup_error}")
+            else:
+                errors.append(error)
+
+        GLib.idle_add(
+            finish_all_image_pulls,
+            icon,
+            images,
+            successful_images,
+            removed_image_count,
+            errors,
+            cleanup_errors,
+        )
+
+    threading.Thread(target=_pull_all, daemon=True).start()
+
+
+def run_image_compose_pull(
+    icon,
+    image,
+    start_recheck=True,
+    schedule_completion=True,
+):
     replaced_image_ids = get_container_image_ids_for_reference(image)
     targets = get_compose_pull_targets_for_image(image)
     if not targets:
-        GLib.idle_add(
-            fail_image_pull,
+        return schedule_image_pull_failure(
             icon,
             image,
             f"No compose service was found for {image}.",
+            schedule_completion=schedule_completion,
         )
-        return
 
     for config_files, service, working_dir in targets:
         GLib.idle_add(set_image_pull_status, icon, f"Pulling {image} for {service}...")
         try:
             result = run_compose_pull(config_files, service, working_dir)
         except subprocess.TimeoutExpired:
-            GLib.idle_add(
-                fail_image_pull,
+            return schedule_image_pull_failure(
                 icon,
                 image,
                 f"Pull timed out for {image}.",
+                schedule_completion=schedule_completion,
             )
-            return
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "docker compose pull failed"
-            GLib.idle_add(
-                fail_image_pull,
+            return schedule_image_pull_failure(
                 icon,
                 image,
                 f"Pull failed for {image}: {detail}",
+                schedule_completion=schedule_completion,
             )
-            return
         GLib.idle_add(set_image_pull_status, icon, f"Restarting {service}...")
         try:
             result = run_compose_service_up(config_files, service, working_dir)
         except subprocess.TimeoutExpired:
-            GLib.idle_add(
-                fail_image_pull,
+            return schedule_image_pull_failure(
                 icon,
                 image,
                 f"Pulled {image}, but restarting compose service {service} timed out.",
+                schedule_completion=schedule_completion,
             )
-            return
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "docker compose up failed"
-            GLib.idle_add(
-                fail_image_pull,
+            return schedule_image_pull_failure(
                 icon,
                 image,
                 f"Pulled {image}, but restarting compose service {service} failed: {detail}",
+                schedule_completion=schedule_completion,
             )
-            return
         GLib.idle_add(set_image_pull_status, icon, f"Waiting for {service} to finish restarting...")
         if not wait_for_compose_service_ready(config_files, service, working_dir):
-            GLib.idle_add(
-                fail_image_pull,
+            return schedule_image_pull_failure(
                 icon,
                 image,
                 f"Restarted {service}, but it was not ready after {DOCKER_COMPOSE_RESTART_SETTLE_SECONDS} seconds.",
+                schedule_completion=schedule_completion,
             )
-            return
 
     removed_image_count = 0
     cleanup_error = ""
@@ -2446,14 +2564,17 @@ def run_image_compose_pull(icon, image):
         except Exception as error:
             cleanup_error = get_command_failure_detail(error=error)
 
-    GLib.idle_add(
-        finish_image_pull,
-        icon,
-        image,
-        len(targets),
-        removed_image_count,
-        cleanup_error,
-    )
+    if schedule_completion:
+        GLib.idle_add(
+            finish_image_pull,
+            icon,
+            image,
+            len(targets),
+            removed_image_count,
+            cleanup_error,
+            start_recheck,
+        )
+    return True, "", removed_image_count, cleanup_error
 
 
 def show_updates_dialog(icon):
@@ -2487,6 +2608,13 @@ def show_updates_dialog(icon):
         images_label.set_xalign(0)
         box.pack_start(images_label, False, False, 0)
         pull_in_progress = bool(updates_dialog["pulling_images"])
+        update_all_button = Gtk.Button(
+            label="Updating all..." if pull_in_progress else "Update + cleanup all",
+        )
+        update_all_button.set_sensitive(not pull_in_progress)
+        if not pull_in_progress:
+            update_all_button.connect("clicked", lambda button: start_all_image_compose_pulls(icon))
+        box.pack_start(update_all_button, False, False, 0)
         for image in image_updates:
             is_pulling = image in updates_dialog["pulling_images"]
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -2494,7 +2622,7 @@ def show_updates_dialog(icon):
             image_label.set_xalign(0)
             image_label.set_hexpand(True)
             image_label.set_line_wrap(True)
-            pull_button = Gtk.Button(label="Pulling" if is_pulling else "Pull + restart")
+            pull_button = Gtk.Button(label="Pulling" if is_pulling else "Update + cleanup")
             pull_button.set_sensitive(not pull_in_progress)
             if not pull_in_progress:
                 pull_button.connect(
