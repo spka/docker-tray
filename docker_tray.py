@@ -56,6 +56,7 @@ DOCKER_COMPOSE_UP_TIMEOUT_SECONDS = 3 * 60
 DOCKER_ENGINE_UPGRADE_TIMEOUT_SECONDS = 30 * 60
 DOCKER_COMPOSE_RESTART_SETTLE_SECONDS = 60
 DOCKER_COMPOSE_RESTART_POLL_SECONDS = 2
+COMMAND_ERROR_DETAIL_MAX_CHARS = 500
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
@@ -266,36 +267,73 @@ def extract_web_port(ports_str):
     return match.group(1) if match else None
 
 
+def get_command_failure_detail(result=None, error=None):
+    if isinstance(error, subprocess.TimeoutExpired):
+        detail = f"timed out after {error.timeout} seconds"
+    elif error is not None:
+        detail = f"{type(error).__name__}: {error}"
+    elif result is not None:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+    else:
+        detail = "unknown failure"
+    detail = format_docker_error(detail)
+    if len(detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
+        return detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
+    return detail
+
+
+def notify_command_failure(icon, operation, result=None, error=None):
+    if icon is None:
+        return
+    detail = get_command_failure_detail(result=result, error=error)
+    notify_user(icon, f"{operation}: {detail}")
+
+
+def notify_user(icon, message):
+    try:
+        icon.notify(message, "Docker Tray")
+    except Exception:
+        pass
+
+
 def run_docker_action(action, name, icon=None):
     def _run():
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["docker", action, name],
                 capture_output=True,
                 text=True,
                 timeout=DOCKER_CMD_TIMEOUT_SECONDS,
             )
-        except Exception:
-            pass
+            if result.returncode != 0:
+                notify_command_failure(icon, f"Could not {action} {name}", result=result)
+        except Exception as error:
+            notify_command_failure(icon, f"Could not {action} {name}", error=error)
         if icon is not None:
             update_tray_menu(icon)
 
     threading.Thread(target=_run, daemon=True).start()
 
 
-def run_compose_up(compose_file, icon=None):
+def run_compose_up(compose_file, icon=None, on_finished=None):
     def _run():
+        success = False
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["docker", "compose", "-f", str(compose_file), "up", "-d"],
                 capture_output=True,
                 text=True,
                 timeout=DOCKER_COMPOSE_UP_TIMEOUT_SECONDS,
             )
-        except Exception:
-            pass
+            success = result.returncode == 0
+            if not success:
+                notify_command_failure(icon, f"Could not start {compose_file}", result=result)
+        except Exception as error:
+            notify_command_failure(icon, f"Could not start {compose_file}", error=error)
         if icon is not None:
             update_tray_menu(icon)
+        if on_finished is not None:
+            GLib.idle_add(on_finished, success)
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -1122,20 +1160,31 @@ def poll_compose_start_state(compose_file, icon, row, action):
             update_tray_menu(icon)
             return
 
+    waited_seconds = COMPOSE_START_POLL_ATTEMPTS * COMPOSE_START_POLL_SECONDS
+    notify_user(
+        icon,
+        f"Could not start {compose_file}: no running container appeared within {waited_seconds} seconds",
+    )
     GLib.idle_add(set_compose_dialog_action_failed, action)
 
 
 def run_compose_file_from_dialog(compose_file, icon, button):
-    run_compose_up(compose_file, icon)
     button.set_label("Starting")
     button.set_sensitive(False)
     update_tray_menu(icon)
     row = button.get_parent()
-    threading.Thread(
-        target=poll_compose_start_state,
-        args=(compose_file, icon, row, button),
-        daemon=True,
-    ).start()
+
+    def _finished(success):
+        if not success:
+            return set_compose_dialog_action_failed(button)
+        threading.Thread(
+            target=poll_compose_start_state,
+            args=(compose_file, icon, row, button),
+            daemon=True,
+        ).start()
+        return GLib.SOURCE_REMOVE
+
+    run_compose_up(compose_file, icon, _finished)
 
 
 def close_compose_scan_window_countdown(label, remaining):
