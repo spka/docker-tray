@@ -53,6 +53,7 @@ DOCKER_CMD_TIMEOUT_SECONDS = 15
 DOCKER_MANIFEST_TIMEOUT_SECONDS = 30
 DOCKER_COMPOSE_PULL_TIMEOUT_SECONDS = 10 * 60
 DOCKER_COMPOSE_UP_TIMEOUT_SECONDS = 3 * 60
+DOCKER_ENGINE_UPGRADE_TIMEOUT_SECONDS = 30 * 60
 DOCKER_COMPOSE_RESTART_SETTLE_SECONDS = 60
 DOCKER_COMPOSE_RESTART_POLL_SECONDS = 2
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
@@ -118,6 +119,7 @@ updates_dialog = {
     "window": None,
     "content": None,
     "status": "",
+    "engine_upgrading": False,
     "pulling_images": set(),
 }
 container_stats_dialog = {
@@ -2119,7 +2121,7 @@ def poll_updates(icon):
 def clear_updates_dialog():
     updates_dialog["window"] = None
     updates_dialog["content"] = None
-    if not updates_dialog["pulling_images"]:
+    if not updates_dialog["engine_upgrading"] and not updates_dialog["pulling_images"]:
         updates_dialog["status"] = ""
     return GLib.SOURCE_REMOVE
 
@@ -2160,26 +2162,52 @@ def set_updates_dialog_content(content):
     window.present()
 
 
-def start_docker_engine_upgrade(button, icon):
-    button.set_label("Upgrading...")
-    button.set_sensitive(False)
+def start_docker_engine_upgrade(icon):
+    if updates_dialog["engine_upgrading"]:
+        return
+    updates_dialog["engine_upgrading"] = True
+    updates_dialog["status"] = "Upgrading Docker Engine..."
+    show_updates_dialog(icon)
 
     def _upgrade():
         engine_update, _image_updates = get_update_state_snapshot()
-        result = docker_tray_platform.run_engine_upgrade(engine_update)
-        def _done():
-            if result.returncode == 0:
-                _current_engine_update, image_updates = get_update_state_snapshot()
-                set_update_state(icon, docker_tray_platform.EngineUpdate(False), image_updates)
-                destroy_updates_dialog()
-                threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
-            else:
-                button.set_label("Failed — check terminal")
-                button.set_sensitive(True)
-            return GLib.SOURCE_REMOVE
-        GLib.idle_add(_done)
+        try:
+            result = docker_tray_platform.run_engine_upgrade(
+                engine_update,
+                timeout=DOCKER_ENGINE_UPGRADE_TIMEOUT_SECONDS,
+            )
+        except Exception as error:
+            GLib.idle_add(finish_docker_engine_upgrade, icon, None, error)
+            return
+        GLib.idle_add(finish_docker_engine_upgrade, icon, result, None)
 
     threading.Thread(target=_upgrade, daemon=True).start()
+
+
+def finish_docker_engine_upgrade(icon, result, error):
+    updates_dialog["engine_upgrading"] = False
+    if error is not None:
+        if isinstance(error, subprocess.TimeoutExpired):
+            detail = "timed out"
+        else:
+            detail = f"{type(error).__name__}: {error}"
+        updates_dialog["status"] = f"Docker Engine upgrade failed: {detail}"
+        if updates_dialog["window"] is not None:
+            show_updates_dialog(icon)
+        return GLib.SOURCE_REMOVE
+
+    if result.returncode == 0:
+        updates_dialog["status"] = ""
+        _current_engine_update, image_updates = get_update_state_snapshot()
+        set_update_state(icon, docker_tray_platform.EngineUpdate(False), image_updates)
+        destroy_updates_dialog()
+        threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
+    else:
+        detail = result.stderr.strip() or result.stdout.strip() or "upgrade command failed"
+        updates_dialog["status"] = f"Docker Engine upgrade failed: {detail}"
+        if updates_dialog["window"] is not None:
+            show_updates_dialog(icon)
+    return GLib.SOURCE_REMOVE
 
 
 def finish_image_pull(icon, image, service_count):
@@ -2217,70 +2245,82 @@ def start_image_compose_pull(button, icon, image):
     show_updates_dialog(icon)
 
     def _pull():
-        targets = get_compose_pull_targets_for_image(image)
-        if not targets:
+        try:
+            run_image_compose_pull(icon, image)
+        except Exception as error:
             GLib.idle_add(
                 fail_image_pull,
                 icon,
                 image,
-                f"No compose service was found for {image}.",
+                f"Unexpected failure while updating {image}: {type(error).__name__}: {error}",
+            )
+
+    threading.Thread(target=_pull, daemon=True).start()
+
+
+def run_image_compose_pull(icon, image):
+    targets = get_compose_pull_targets_for_image(image)
+    if not targets:
+        GLib.idle_add(
+            fail_image_pull,
+            icon,
+            image,
+            f"No compose service was found for {image}.",
+        )
+        return
+
+    for config_files, service, working_dir in targets:
+        GLib.idle_add(set_image_pull_status, icon, f"Pulling {image} for {service}...")
+        try:
+            result = run_compose_pull(config_files, service, working_dir)
+        except subprocess.TimeoutExpired:
+            GLib.idle_add(
+                fail_image_pull,
+                icon,
+                image,
+                f"Pull timed out for {image}.",
+            )
+            return
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "docker compose pull failed"
+            GLib.idle_add(
+                fail_image_pull,
+                icon,
+                image,
+                f"Pull failed for {image}: {detail}",
+            )
+            return
+        GLib.idle_add(set_image_pull_status, icon, f"Restarting {service}...")
+        try:
+            result = run_compose_service_up(config_files, service, working_dir)
+        except subprocess.TimeoutExpired:
+            GLib.idle_add(
+                fail_image_pull,
+                icon,
+                image,
+                f"Pulled {image}, but restarting compose service {service} timed out.",
+            )
+            return
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "docker compose up failed"
+            GLib.idle_add(
+                fail_image_pull,
+                icon,
+                image,
+                f"Pulled {image}, but restarting compose service {service} failed: {detail}",
+            )
+            return
+        GLib.idle_add(set_image_pull_status, icon, f"Waiting for {service} to finish restarting...")
+        if not wait_for_compose_service_ready(config_files, service, working_dir):
+            GLib.idle_add(
+                fail_image_pull,
+                icon,
+                image,
+                f"Restarted {service}, but it was not ready after {DOCKER_COMPOSE_RESTART_SETTLE_SECONDS} seconds.",
             )
             return
 
-        for config_files, service, working_dir in targets:
-            GLib.idle_add(set_image_pull_status, icon, f"Pulling {image} for {service}...")
-            try:
-                result = run_compose_pull(config_files, service, working_dir)
-            except subprocess.TimeoutExpired:
-                GLib.idle_add(
-                    fail_image_pull,
-                    icon,
-                    image,
-                    f"Pull timed out for {image}.",
-                )
-                return
-            if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip() or "docker compose pull failed"
-                GLib.idle_add(
-                    fail_image_pull,
-                    icon,
-                    image,
-                    f"Pull failed for {image}: {detail}",
-                )
-                return
-            GLib.idle_add(set_image_pull_status, icon, f"Restarting {service}...")
-            try:
-                result = run_compose_service_up(config_files, service, working_dir)
-            except subprocess.TimeoutExpired:
-                GLib.idle_add(
-                    fail_image_pull,
-                    icon,
-                    image,
-                    f"Pulled {image}, but restarting compose service {service} timed out.",
-                )
-                return
-            if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip() or "docker compose up failed"
-                GLib.idle_add(
-                    fail_image_pull,
-                    icon,
-                    image,
-                    f"Pulled {image}, but restarting compose service {service} failed: {detail}",
-                )
-                return
-            GLib.idle_add(set_image_pull_status, icon, f"Waiting for {service} to finish restarting...")
-            if not wait_for_compose_service_ready(config_files, service, working_dir):
-                GLib.idle_add(
-                    fail_image_pull,
-                    icon,
-                    image,
-                    f"Restarted {service}, but it was not ready after {DOCKER_COMPOSE_RESTART_SETTLE_SECONDS} seconds.",
-                )
-                return
-
-        GLib.idle_add(finish_image_pull, icon, image, len(targets))
-
-    threading.Thread(target=_pull, daemon=True).start()
+    GLib.idle_add(finish_image_pull, icon, image, len(targets))
 
 
 def show_updates_dialog(icon):
@@ -2297,8 +2337,12 @@ def show_updates_dialog(icon):
             detail.set_xalign(0)
             box.pack_start(detail, False, False, 0)
         if engine_update.can_upgrade:
-            upgrade_button = Gtk.Button(label=engine_update.upgrade_label)
-            upgrade_button.connect("clicked", lambda b: start_docker_engine_upgrade(upgrade_button, icon))
+            engine_upgrading = updates_dialog["engine_upgrading"]
+            upgrade_button = Gtk.Button(
+                label="Upgrading..." if engine_upgrading else engine_update.upgrade_label,
+            )
+            upgrade_button.set_sensitive(not engine_upgrading)
+            upgrade_button.connect("clicked", lambda b: start_docker_engine_upgrade(icon))
             box.pack_start(upgrade_button, False, False, 0)
         else:
             detail = Gtk.Label(label="Use your system package manager to upgrade Docker.")
@@ -2330,7 +2374,7 @@ def show_updates_dialog(icon):
 
     if updates_dialog["status"]:
         status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        if updates_dialog["status"].startswith(("Pulling ", "Restarting ", "Waiting ")):
+        if updates_dialog["status"].startswith(("Pulling ", "Restarting ", "Waiting ", "Upgrading ")):
             spinner = Gtk.Spinner()
             spinner.start()
             status_row.pack_start(spinner, False, False, 0)

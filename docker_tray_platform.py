@@ -74,13 +74,14 @@ def check_engine_update(timeout, platform_info=None):
     return provider.check(timeout)
 
 
-def run_engine_upgrade(update):
+def run_engine_upgrade(update, timeout=None):
     if not update.can_upgrade:
         raise RuntimeError("Docker Engine upgrade is not available on this platform")
     return subprocess.run(
         list(update.upgrade_command),
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
 
 
