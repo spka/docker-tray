@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import gi
@@ -125,6 +126,12 @@ container_stats_dialog = {
 }
 container_health_state = {
     "level": "ok",
+}
+stats_history_lock = threading.RLock()
+stats_history_cache = {
+    "initialized": False,
+    "peaks": {},
+    "recent": deque(),
 }
 tray_menu_update_lock = threading.Lock()
 tray_menu_update_pending = False
@@ -1450,28 +1457,121 @@ def collect_stats_sample():
 
 
 def append_stats_to_file(samples):
-    STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with STATS_FILE.open("a") as f:
-        for s in samples:
-            f.write(json.dumps(s) + "\n")
+    with stats_history_lock:
+        STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with STATS_FILE.open("a") as f:
+            for sample in samples:
+                f.write(json.dumps(sample) + "\n")
+                if stats_history_cache["initialized"]:
+                    add_stats_entry_to_cache(sample)
+
+
+def add_stats_entry_to_cache(entry, recent_cutoff=None):
+    try:
+        name = entry["name"]
+        timestamp = float(entry["t"])
+        cpu = float(entry["cpu"])
+        memory = int(entry["mem"])
+    except (KeyError, TypeError, ValueError):
+        return
+
+    peak = stats_history_cache["peaks"].setdefault(
+        name,
+        {"cpu": 0.0, "cpu_ts": 0, "mem": 0, "mem_ts": 0},
+    )
+    if cpu > peak["cpu"]:
+        peak["cpu"] = cpu
+        peak["cpu_ts"] = timestamp
+    if memory > peak["mem"]:
+        peak["mem"] = memory
+        peak["mem_ts"] = timestamp
+
+    if recent_cutoff is None:
+        recent_cutoff = time.time() - STATS_CPU_SUSTAINED_WINDOW_SECONDS
+    if timestamp >= recent_cutoff:
+        stats_history_cache["recent"].append(entry)
+
+
+def prune_recent_stats_cache(now=None):
+    cutoff = (now or time.time()) - STATS_CPU_SUSTAINED_WINDOW_SECONDS
+    recent = stats_history_cache["recent"]
+    while recent:
+        try:
+            timestamp = float(recent[0].get("t", 0))
+        except (AttributeError, TypeError, ValueError):
+            recent.popleft()
+            continue
+        if timestamp >= cutoff:
+            break
+        recent.popleft()
+
+
+def ensure_stats_history_cache():
+    with stats_history_lock:
+        if stats_history_cache["initialized"]:
+            prune_recent_stats_cache()
+            return
+
+        stats_history_cache["peaks"] = {}
+        stats_history_cache["recent"] = deque()
+        recent_cutoff = time.time() - STATS_CPU_SUSTAINED_WINDOW_SECONDS
+        if STATS_FILE.exists():
+            with STATS_FILE.open() as history_file:
+                for line in history_file:
+                    try:
+                        entry = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    add_stats_entry_to_cache(entry, recent_cutoff)
+        stats_history_cache["initialized"] = True
+
+
+def get_stats_history_snapshot():
+    ensure_stats_history_cache()
+    with stats_history_lock:
+        prune_recent_stats_cache()
+        return (
+            {name: dict(peak) for name, peak in stats_history_cache["peaks"].items()},
+            list(stats_history_cache["recent"]),
+        )
+
+
+def reset_stats_history_cache():
+    stats_history_cache["initialized"] = False
+    stats_history_cache["peaks"] = {}
+    stats_history_cache["recent"] = deque()
 
 
 def trim_stats_file():
-    if not STATS_FILE.exists():
-        return
-    cutoff = time.time() - STATS_TRIM_DAYS * 86400
-    kept = []
-    for line in STATS_FILE.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
+    with stats_history_lock:
+        if not STATS_FILE.exists():
+            return
+
+        cutoff = time.time() - STATS_TRIM_DAYS * 86400
+        temporary_file = STATS_FILE.with_name(f".{STATS_FILE.name}.tmp")
         try:
-            entry = json.loads(stripped)
-        except Exception:
-            continue
-        if entry.get("t", 0) >= cutoff:
-            kept.append(stripped)
-    STATS_FILE.write_text("\n".join(kept) + ("\n" if kept else ""))
+            with STATS_FILE.open() as source, temporary_file.open("w") as destination:
+                for line in source:
+                    try:
+                        entry = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("t", 0) >= cutoff:
+                        destination.write(json.dumps(entry) + "\n")
+            temporary_file.replace(STATS_FILE)
+        finally:
+            temporary_file.unlink(missing_ok=True)
+
+        reset_stats_history_cache()
+
+
+def trim_stats_file_if_needed():
+    if get_stats_file_size_mb() >= STATS_MAX_SIZE_MB:
+        trim_stats_file()
 
 
 def get_stats_file_size_mb():
@@ -1479,21 +1579,6 @@ def get_stats_file_size_mb():
         return STATS_FILE.stat().st_size / 1_000_000
     except FileNotFoundError:
         return 0.0
-
-
-def load_stats_history():
-    if not STATS_FILE.exists():
-        return []
-    entries = []
-    for line in STATS_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except Exception:
-            continue
-    return entries
 
 
 def get_container_restart_counts():
@@ -1536,26 +1621,17 @@ def get_container_uptimes():
 
 
 def build_stats_summary(current_samples=None):
-    history = load_stats_history()
+    peaks, recent_history = get_stats_history_snapshot()
     if current_samples is None:
         current_samples = collect_stats_sample()
     restarts = get_container_restart_counts()
     uptimes = get_container_uptimes()
     recent_cutoff = time.time() - STATS_CPU_SUSTAINED_WINDOW_SECONDS
 
-    peaks = {}
     recent_warning_counts = {}
     recent_critical_counts = {}
-    for entry in history:
+    for entry in recent_history:
         name = entry["name"]
-        if name not in peaks:
-            peaks[name] = {"cpu": 0.0, "cpu_ts": 0, "mem": 0, "mem_ts": 0}
-        if entry["cpu"] > peaks[name]["cpu"]:
-            peaks[name]["cpu"] = entry["cpu"]
-            peaks[name]["cpu_ts"] = entry["t"]
-        if entry["mem"] > peaks[name]["mem"]:
-            peaks[name]["mem"] = entry["mem"]
-            peaks[name]["mem_ts"] = entry["t"]
         if entry.get("t", 0) >= recent_cutoff:
             if entry["cpu"] >= STATS_CPU_WARNING_PCT:
                 recent_warning_counts[name] = recent_warning_counts.get(name, 0) + 1
@@ -1632,6 +1708,7 @@ def poll_container_stats(icon):
             samples = collect_stats_sample()
             if samples:
                 append_stats_to_file(samples)
+                trim_stats_file_if_needed()
                 summary, system_mem_total = build_stats_summary(samples)
                 level, *_ = compute_health(
                     summary,
