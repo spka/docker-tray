@@ -8,7 +8,9 @@ import subprocess
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import gi
 
@@ -21,6 +23,9 @@ import docker_tray_platform
 
 
 APP_VERSION = "0.2.0"
+APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
+APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
+APP_UPDATE_TIMEOUT_SECONDS = 10
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Names}}\t"
@@ -93,6 +98,15 @@ COMPOSE_SCAN_SKIP_DIRS = {
     "var/lib/containerd",
     "var/lib/docker",
 }
+
+
+@dataclass(frozen=True)
+class AppUpdate:
+    available: bool
+    latest_version: str = ""
+    release_url: str = APP_RELEASES_URL
+
+
 compose_scan_lock = threading.Lock()
 compose_scan_state = {
     "running": False,
@@ -112,6 +126,7 @@ cleanup_dialog = {
     "spinner": None,
 }
 update_check_state = {
+    "app_update": AppUpdate(False),
     "engine_update": docker_tray_platform.EngineUpdate(False),
     "image_updates": [],
 }
@@ -2163,6 +2178,39 @@ def is_image_id_reference(image):
     return bool(re.fullmatch(r"[0-9a-fA-F]{12,64}", image))
 
 
+def parse_app_version(version):
+    match = re.fullmatch(r"v?(\d+)\.(\d+)(?:\.(\d+))?", version.strip())
+    if not match:
+        raise ValueError(f"Unsupported version: {version}")
+    return tuple(int(part or 0) for part in match.groups())
+
+
+def check_app_update():
+    request = Request(
+        APP_LATEST_RELEASE_API_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"docker-tray/{APP_VERSION}",
+        },
+    )
+    with urlopen(request, timeout=APP_UPDATE_TIMEOUT_SECONDS) as response:
+        release = json.loads(response.read())
+
+    tag_name = release.get("tag_name", "")
+    latest_version = tag_name.removeprefix("v")
+    if parse_app_version(latest_version) <= parse_app_version(APP_VERSION):
+        return AppUpdate(False)
+
+    release_url = release.get("html_url", "")
+    if not release_url.startswith(f"{APP_RELEASES_URL}/"):
+        release_url = f"{APP_RELEASES_URL}/tag/{tag_name}"
+    return AppUpdate(
+        True,
+        latest_version=latest_version,
+        release_url=release_url,
+    )
+
+
 def check_image_updates():
     container_refs = get_container_image_refs()
     images = sorted({
@@ -2193,23 +2241,43 @@ def get_update_state_snapshot():
         )
 
 
-def set_update_state(icon, engine_update, image_updates):
+def get_app_update_snapshot():
     with update_check_lock:
+        return update_check_state["app_update"]
+
+
+def set_update_state(icon, engine_update, image_updates, app_update=None):
+    with update_check_lock:
+        if app_update is None:
+            app_update = update_check_state["app_update"]
+        app_update_became_available = (
+            app_update.available
+            and app_update != update_check_state["app_update"]
+        )
         changed = (
-            engine_update != update_check_state["engine_update"]
+            app_update != update_check_state["app_update"]
+            or engine_update != update_check_state["engine_update"]
             or image_updates != update_check_state["image_updates"]
         )
+        update_check_state["app_update"] = app_update
         update_check_state["engine_update"] = engine_update
         update_check_state["image_updates"] = image_updates
     if changed:
         update_tray_menu(icon)
         if updates_dialog["window"] is not None:
             show_updates_dialog(icon)
+    if app_update_became_available:
+        notify_user(icon, f"Docker Tray {app_update.latest_version} is available.")
     return GLib.SOURCE_REMOVE
 
 
 def run_update_check(icon):
     previous_engine_update, previous_image_updates = get_update_state_snapshot()
+    previous_app_update = get_app_update_snapshot()
+    try:
+        app_update = check_app_update()
+    except Exception:
+        app_update = previous_app_update
     try:
         engine_update = check_engine_update()
     except Exception:
@@ -2218,7 +2286,7 @@ def run_update_check(icon):
         image_updates = check_image_updates()
     except Exception:
         image_updates = previous_image_updates
-    GLib.idle_add(set_update_state, icon, engine_update, image_updates)
+    GLib.idle_add(set_update_state, icon, engine_update, image_updates, app_update)
 
 
 def poll_updates(icon):
@@ -2581,7 +2649,24 @@ def show_updates_dialog(icon):
     ensure_updates_dialog()
     box = make_dialog_box()
 
+    app_update = get_app_update_snapshot()
     engine_update, image_updates = get_update_state_snapshot()
+    if app_update.available:
+        app_label = Gtk.Label(label="Docker Tray update available")
+        app_label.set_xalign(0)
+        box.pack_start(app_label, False, False, 0)
+
+        version_label = Gtk.Label(label=f"{APP_VERSION} → {app_update.latest_version}")
+        version_label.set_xalign(0)
+        box.pack_start(version_label, False, False, 0)
+
+        release_button = Gtk.Button(label="Open release")
+        release_button.connect(
+            "clicked",
+            lambda button, url=app_update.release_url: open_uri(url),
+        )
+        box.pack_start(release_button, False, False, 0)
+
     if engine_update.available:
         engine_label = Gtk.Label(label=f"{engine_update.package_name} update available")
         engine_label.set_xalign(0)
@@ -2647,8 +2732,8 @@ def show_updates_dialog(icon):
         status_row.pack_start(status_label, True, True, 0)
         box.pack_start(status_row, False, False, 0)
 
-    if not engine_update.available and not image_updates:
-        done_label = Gtk.Label(label="No image updates pending.")
+    if not app_update.available and not engine_update.available and not image_updates:
+        done_label = Gtk.Label(label="No updates pending.")
         done_label.set_xalign(0)
         box.pack_start(done_label, False, False, 0)
 
@@ -2683,6 +2768,7 @@ def get_settings_items(pystray):
 
 def get_menu_items(pystray):
     items = []
+    app_update = get_app_update_snapshot()
     engine_update, image_updates = get_update_state_snapshot()
     if container_health_state["level"] == "critical":
         items.append(pystray.MenuItem("🔴 Container issue detected", open_container_stats_dialog))
@@ -2690,7 +2776,7 @@ def get_menu_items(pystray):
         items.append(pystray.MenuItem("🟡 Container warning", open_container_stats_dialog))
     elif container_health_state["level"] == "unknown" and is_docker_installed():
         items.append(pystray.MenuItem("⚪ Container stats unavailable", open_container_stats_dialog))
-    if engine_update.available or image_updates:
+    if app_update.available or engine_update.available or image_updates:
         items.append(pystray.MenuItem("⬆️ Updates available", open_updates_dialog))
     if items:
         items.append(pystray.Menu.SEPARATOR)
