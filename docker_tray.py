@@ -1622,23 +1622,50 @@ def get_container_uptimes():
     return uptimes
 
 
+def get_recent_cpu_streak_counts(history, current_samples):
+    samples_by_name = {}
+    for sample in (*history, *current_samples):
+        try:
+            name = sample["name"]
+            timestamp = float(sample["t"])
+            cpu = float(sample["cpu"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        samples_by_name.setdefault(name, {})[timestamp] = cpu
+
+    warning_counts = {}
+    critical_counts = {}
+    for name, samples_by_time in samples_by_name.items():
+        warning_count = 0
+        critical_count = 0
+        warning_streak_active = True
+        critical_streak_active = True
+        for _timestamp, cpu in sorted(samples_by_time.items(), reverse=True):
+            if warning_streak_active and cpu >= STATS_CPU_WARNING_PCT:
+                warning_count += 1
+            else:
+                warning_streak_active = False
+            if critical_streak_active and cpu >= STATS_CPU_CRITICAL_PCT:
+                critical_count += 1
+            else:
+                critical_streak_active = False
+            if not warning_streak_active and not critical_streak_active:
+                break
+        warning_counts[name] = warning_count
+        critical_counts[name] = critical_count
+    return warning_counts, critical_counts
+
+
 def build_stats_summary(current_samples=None):
     peaks, recent_history = get_stats_history_snapshot()
     if current_samples is None:
         current_samples = collect_stats_sample()
     restarts = get_container_restart_counts()
     uptimes = get_container_uptimes()
-    recent_cutoff = time.time() - STATS_CPU_SUSTAINED_WINDOW_SECONDS
-
-    recent_warning_counts = {}
-    recent_critical_counts = {}
-    for entry in recent_history:
-        name = entry["name"]
-        if entry.get("t", 0) >= recent_cutoff:
-            if entry["cpu"] >= STATS_CPU_WARNING_PCT:
-                recent_warning_counts[name] = recent_warning_counts.get(name, 0) + 1
-            if entry["cpu"] >= STATS_CPU_CRITICAL_PCT:
-                recent_critical_counts[name] = recent_critical_counts.get(name, 0) + 1
+    recent_warning_counts, recent_critical_counts = get_recent_cpu_streak_counts(
+        recent_history,
+        current_samples,
+    )
 
     summary = []
     for s in current_samples:
@@ -1646,10 +1673,10 @@ def build_stats_summary(current_samples=None):
         p = peaks.get(name, {})
         recent_warning_count = recent_warning_counts.get(name, 0)
         recent_critical_count = recent_critical_counts.get(name, 0)
-        if s["cpu"] >= STATS_CPU_WARNING_PCT:
-            recent_warning_count += 1
-        if s["cpu"] >= STATS_CPU_CRITICAL_PCT:
-            recent_critical_count += 1
+        peak_cpu = max(p.get("cpu", 0.0), s["cpu"])
+        peak_cpu_ts = s["t"] if peak_cpu == s["cpu"] else p.get("cpu_ts", 0)
+        peak_mem = max(p.get("mem", 0), s["mem"])
+        peak_mem_ts = s["t"] if peak_mem == s["mem"] else p.get("mem_ts", 0)
         summary.append({
             "name": name,
             "cpu": s["cpu"],
@@ -1657,10 +1684,10 @@ def build_stats_summary(current_samples=None):
             "mem_str": s["mem_str"],
             "uptime": uptimes.get(name, ""),
             "restarts": restarts.get(name, 0),
-            "peak_cpu": p.get("cpu", s["cpu"]),
-            "peak_cpu_ts": p.get("cpu_ts", 0),
-            "peak_mem": p.get("mem", s["mem"]),
-            "peak_mem_ts": p.get("mem_ts", 0),
+            "peak_cpu": peak_cpu,
+            "peak_cpu_ts": peak_cpu_ts,
+            "peak_mem": peak_mem,
+            "peak_mem_ts": peak_mem_ts,
             "recent_cpu_warning_count": recent_warning_count,
             "recent_cpu_critical_count": recent_critical_count,
         })
@@ -1709,13 +1736,13 @@ def poll_container_stats(icon):
         try:
             samples = collect_stats_sample()
             if samples:
-                append_stats_to_file(samples)
-                trim_stats_file_if_needed()
                 summary, system_mem_total = build_stats_summary(samples)
                 level, *_ = compute_health(
                     summary,
                     system_mem_total,
                 )
+                append_stats_to_file(samples)
+                trim_stats_file_if_needed()
                 if level != container_health_state["level"]:
                     container_health_state["level"] = level
                     update_tray_menu(icon)

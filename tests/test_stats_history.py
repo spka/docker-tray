@@ -71,6 +71,47 @@ class StatsHistoryTests(unittest.TestCase):
         self.assertEqual([recent_entry], entries)
         self.assertFalse(docker_tray.stats_history_cache["initialized"])
 
+    def test_current_low_sample_breaks_an_earlier_high_cpu_streak(self):
+        history = [
+            {"t": 1, "name": "web", "cpu": 90.0},
+            {"t": 2, "name": "web", "cpu": 95.0},
+        ]
+        current = [{"t": 3, "name": "web", "cpu": 10.0}]
+
+        with (
+            mock.patch.object(docker_tray, "STATS_CPU_WARNING_PCT", 50.0),
+            mock.patch.object(docker_tray, "STATS_CPU_CRITICAL_PCT", 80.0),
+        ):
+            warning, critical = docker_tray.get_recent_cpu_streak_counts(history, current)
+
+        self.assertEqual(0, warning["web"])
+        self.assertEqual(0, critical["web"])
+
+    def test_current_high_sample_continues_a_cpu_streak(self):
+        history = [{"t": 1, "name": "web", "cpu": 90.0}]
+        current = [{"t": 2, "name": "web", "cpu": 85.0}]
+
+        with (
+            mock.patch.object(docker_tray, "STATS_CPU_WARNING_PCT", 50.0),
+            mock.patch.object(docker_tray, "STATS_CPU_CRITICAL_PCT", 80.0),
+        ):
+            warning, critical = docker_tray.get_recent_cpu_streak_counts(history, current)
+
+        self.assertEqual(2, warning["web"])
+        self.assertEqual(2, critical["web"])
+
+    def test_current_sample_is_not_counted_twice(self):
+        current = {"t": 2, "name": "web", "cpu": 85.0}
+
+        with (
+            mock.patch.object(docker_tray, "STATS_CPU_WARNING_PCT", 50.0),
+            mock.patch.object(docker_tray, "STATS_CPU_CRITICAL_PCT", 80.0),
+        ):
+            warning, critical = docker_tray.get_recent_cpu_streak_counts([current], [current])
+
+        self.assertEqual(1, warning["web"])
+        self.assertEqual(1, critical["web"])
+
 
 if __name__ == "__main__":
     unittest.main()
