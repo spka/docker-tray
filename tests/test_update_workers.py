@@ -96,6 +96,85 @@ class UpdateWorkerTests(unittest.TestCase):
             timeout=123,
         )
 
+    @mock.patch.object(docker_tray, "run_docker_capture")
+    @mock.patch.object(docker_tray, "get_container_image_ids")
+    def test_replaced_image_cleanup_skips_images_still_used_by_containers(
+        self,
+        get_container_image_ids,
+        run_docker_capture,
+    ):
+        old_unused = "sha256:" + "1" * 64
+        old_still_used = "sha256:" + "2" * 64
+        get_container_image_ids.return_value = {old_still_used}
+        run_docker_capture.return_value = subprocess.CompletedProcess(
+            args=["docker", "image", "rm"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        removed, error = docker_tray.remove_unused_replaced_images({old_unused, old_still_used})
+
+        self.assertEqual(1, removed)
+        self.assertEqual("", error)
+        run_docker_capture.assert_called_once_with(
+            ["docker", "image", "rm", old_unused],
+            check=False,
+        )
+
+    @mock.patch.object(docker_tray, "run_docker_capture")
+    @mock.patch.object(docker_tray, "get_container_image_ids", return_value=set())
+    def test_replaced_image_cleanup_reports_removal_failure(
+        self,
+        _get_container_image_ids,
+        run_docker_capture,
+    ):
+        old_image = "sha256:" + "1" * 64
+        run_docker_capture.return_value = subprocess.CompletedProcess(
+            args=["docker", "image", "rm"],
+            returncode=1,
+            stdout="",
+            stderr="image is referenced by another tag",
+        )
+
+        removed, error = docker_tray.remove_unused_replaced_images({old_image})
+
+        self.assertEqual(0, removed)
+        self.assertEqual("image is referenced by another tag", error)
+
+    @mock.patch.object(docker_tray, "finish_image_pull")
+    @mock.patch.object(docker_tray, "set_image_pull_status")
+    @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)
+    @mock.patch.object(docker_tray, "remove_unused_replaced_images", return_value=(1, ""))
+    @mock.patch.object(docker_tray, "wait_for_compose_service_ready", return_value=True)
+    @mock.patch.object(docker_tray, "run_compose_service_up")
+    @mock.patch.object(docker_tray, "run_compose_pull")
+    @mock.patch.object(docker_tray, "get_compose_pull_targets_for_image")
+    @mock.patch.object(docker_tray, "get_container_image_ids_for_reference")
+    def test_successful_image_update_removes_replaced_image_after_restart(
+        self,
+        get_old_images,
+        get_targets,
+        run_pull,
+        run_up,
+        _wait_ready,
+        remove_old_images,
+        _idle_add,
+        _set_status,
+        finish_pull,
+    ):
+        old_image = "sha256:" + "1" * 64
+        get_old_images.return_value = {old_image}
+        get_targets.return_value = [(('compose.yml',), "web", "/srv/web")]
+        run_pull.return_value = subprocess.CompletedProcess([], 0, "", "")
+        run_up.return_value = subprocess.CompletedProcess([], 0, "", "")
+        icon = mock.Mock()
+
+        docker_tray.run_image_compose_pull(icon, "example:latest")
+
+        remove_old_images.assert_called_once_with({old_image})
+        finish_pull.assert_called_once_with(icon, "example:latest", 1, 1, "")
+
 
 if __name__ == "__main__":
     unittest.main()

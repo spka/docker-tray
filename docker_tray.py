@@ -2092,6 +2092,31 @@ def get_container_image_refs():
     return refs
 
 
+def get_container_image_ids_for_reference(image):
+    return {
+        container_image_id
+        for config_image, container_image_id in get_container_image_refs()
+        if config_image == image and container_image_id
+    }
+
+
+def remove_unused_replaced_images(replaced_image_ids):
+    used_image_ids = get_container_image_ids()
+    removable_image_ids = sorted(set(replaced_image_ids) - used_image_ids)
+    removed_count = 0
+    errors = []
+    for image_id in removable_image_ids:
+        result = run_docker_capture(
+            ["docker", "image", "rm", image_id],
+            check=False,
+        )
+        if result.returncode == 0:
+            removed_count += 1
+        else:
+            errors.append(get_command_failure_detail(result=result))
+    return removed_count, "; ".join(errors)
+
+
 def get_remote_config_digest(image):
     result = subprocess.run(
         ["docker", "manifest", "inspect", "--verbose", image],
@@ -2295,12 +2320,18 @@ def finish_docker_engine_upgrade(icon, result, error):
     return GLib.SOURCE_REMOVE
 
 
-def finish_image_pull(icon, image, service_count):
+def finish_image_pull(icon, image, service_count, removed_image_count=0, cleanup_error=""):
     updates_dialog["pulling_images"].discard(image)
     engine_update, image_updates = get_update_state_snapshot()
     image_updates = [update_image for update_image in image_updates if update_image != image]
     set_update_state(icon, engine_update, image_updates)
-    updates_dialog["status"] = f"Finished pulling and restarting {image} for {service_count} compose service(s)."
+    status = f"Finished pulling and restarting {image} for {service_count} compose service(s)."
+    if removed_image_count:
+        noun = "image" if removed_image_count == 1 else "images"
+        status += f" Removed {removed_image_count} replaced {noun}."
+    if cleanup_error:
+        status += f" Replaced image cleanup failed: {cleanup_error}"
+    updates_dialog["status"] = status
     if updates_dialog["window"] is not None:
         show_updates_dialog(icon)
     threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
@@ -2344,6 +2375,7 @@ def start_image_compose_pull(button, icon, image):
 
 
 def run_image_compose_pull(icon, image):
+    replaced_image_ids = get_container_image_ids_for_reference(image)
     targets = get_compose_pull_targets_for_image(image)
     if not targets:
         GLib.idle_add(
@@ -2405,7 +2437,23 @@ def run_image_compose_pull(icon, image):
             )
             return
 
-    GLib.idle_add(finish_image_pull, icon, image, len(targets))
+    removed_image_count = 0
+    cleanup_error = ""
+    if replaced_image_ids:
+        GLib.idle_add(set_image_pull_status, icon, f"Removing the replaced {image} image...")
+        try:
+            removed_image_count, cleanup_error = remove_unused_replaced_images(replaced_image_ids)
+        except Exception as error:
+            cleanup_error = get_command_failure_detail(error=error)
+
+    GLib.idle_add(
+        finish_image_pull,
+        icon,
+        image,
+        len(targets),
+        removed_image_count,
+        cleanup_error,
+    )
 
 
 def show_updates_dialog(icon):
@@ -2459,7 +2507,9 @@ def show_updates_dialog(icon):
 
     if updates_dialog["status"]:
         status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        if updates_dialog["status"].startswith(("Pulling ", "Restarting ", "Waiting ", "Upgrading ")):
+        if updates_dialog["status"].startswith(
+            ("Pulling ", "Restarting ", "Waiting ", "Upgrading ", "Removing "),
+        ):
             spinner = Gtk.Spinner()
             spinner.start()
             status_row.pack_start(spinner, False, False, 0)
