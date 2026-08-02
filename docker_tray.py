@@ -20,7 +20,7 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.1.25"
+APP_VERSION = "0.2.0"
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Names}}\t"
