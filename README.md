@@ -34,16 +34,16 @@ Install the release package and run the packaged launcher:
 
 ```bash
 # Download the release package to /tmp.
-curl -L -o /tmp/docker-tray_0.2.1_all.deb https://github.com/spka/docker-tray/releases/download/v0.2.1/docker-tray_0.2.1_all.deb
+curl -L -o /tmp/docker-tray_0.2.2_all.deb https://github.com/spka/docker-tray/releases/download/v0.2.2/docker-tray_0.2.2_all.deb
 
 # Make the file readable by apt's sandbox user.
-chmod 0644 /tmp/docker-tray_0.2.1_all.deb
+chmod 0644 /tmp/docker-tray_0.2.2_all.deb
 
 # Install or upgrade Docker Tray.
-sudo apt install /tmp/docker-tray_0.2.1_all.deb
+sudo apt install /tmp/docker-tray_0.2.2_all.deb
 
 # Remove the temporary package file.
-rm /tmp/docker-tray_0.2.1_all.deb
+rm /tmp/docker-tray_0.2.2_all.deb
 ```
 
 Docker Tray starts automatically on login after installing the package.

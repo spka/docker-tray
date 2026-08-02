@@ -22,7 +22,7 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_UPDATE_TIMEOUT_SECONDS = 10
