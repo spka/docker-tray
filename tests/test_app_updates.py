@@ -1,4 +1,7 @@
 import json
+import hashlib
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -9,11 +12,12 @@ def run_idle_callback(callback, *args):
     return callback(*args)
 
 
-def github_response(tag_name, html_url=None):
+def github_response(tag_name, html_url=None, assets=None):
     response = mock.MagicMock()
     response.__enter__.return_value.read.return_value = json.dumps({
         "tag_name": tag_name,
         "html_url": html_url or f"https://github.com/spka/docker-tray/releases/tag/{tag_name}",
+        "assets": assets or [],
     }).encode()
     return response
 
@@ -40,7 +44,17 @@ class AppUpdateTests(unittest.TestCase):
 
     @mock.patch.object(docker_tray, "urlopen")
     def test_newer_github_release_creates_app_update(self, urlopen):
-        urlopen.return_value = github_response("v0.3.0")
+        package_data = b"debian package"
+        package_url = (
+            "https://github.com/spka/docker-tray/releases/download/v0.3.0/"
+            "docker-tray_0.3.0_all.deb"
+        )
+        package_digest = f"sha256:{hashlib.sha256(package_data).hexdigest()}"
+        urlopen.return_value = github_response("v0.3.0", assets=[{
+            "name": "docker-tray_0.3.0_all.deb",
+            "browser_download_url": package_url,
+            "digest": package_digest,
+        }])
 
         update = docker_tray.check_app_update()
 
@@ -50,6 +64,8 @@ class AppUpdateTests(unittest.TestCase):
             "https://github.com/spka/docker-tray/releases/tag/v0.3.0",
             update.release_url,
         )
+        self.assertEqual(package_url, update.package_url)
+        self.assertEqual(package_digest, update.package_digest)
         request = urlopen.call_args.args[0]
         self.assertEqual(f"docker-tray/{docker_tray.APP_VERSION}", request.get_header("User-agent"))
         self.assertEqual(docker_tray.APP_UPDATE_TIMEOUT_SECONDS, urlopen.call_args.kwargs["timeout"])
@@ -76,6 +92,92 @@ class AppUpdateTests(unittest.TestCase):
     def test_invalid_release_version_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unsupported version"):
             docker_tray.parse_app_version("latest")
+
+    @mock.patch.object(docker_tray, "urlopen")
+    def test_untrusted_release_package_is_not_installable(self, urlopen):
+        urlopen.return_value = github_response("v0.3.0", assets=[{
+            "name": "docker-tray_0.3.0_all.deb",
+            "browser_download_url": "https://example.com/docker-tray_0.3.0_all.deb",
+            "digest": f"sha256:{'0' * 64}",
+        }])
+
+        update = docker_tray.check_app_update()
+
+        self.assertEqual("", update.package_url)
+
+    @mock.patch.object(docker_tray, "validate_app_update_package")
+    @mock.patch.object(docker_tray, "urlopen")
+    def test_download_verifies_release_checksum(self, urlopen, validate_package):
+        package_data = b"valid package bytes"
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.side_effect = [package_data, b""]
+        urlopen.return_value = response
+        update = docker_tray.AppUpdate(
+            True,
+            latest_version="0.3.0",
+            package_url=(
+                "https://github.com/spka/docker-tray/releases/download/v0.3.0/"
+                "docker-tray_0.3.0_all.deb"
+            ),
+            package_digest=f"sha256:{hashlib.sha256(package_data).hexdigest()}",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_path = docker_tray.download_app_update(update, temp_dir)
+            self.assertEqual(package_data, package_path.read_bytes())
+
+        validate_package.assert_called_once_with(package_path, "0.3.0")
+
+    @mock.patch.object(docker_tray, "validate_app_update_package")
+    @mock.patch.object(docker_tray, "urlopen")
+    def test_download_rejects_wrong_checksum(self, urlopen, _validate_package):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.side_effect = [b"wrong bytes", b""]
+        urlopen.return_value = response
+        update = docker_tray.AppUpdate(
+            True,
+            latest_version="0.3.0",
+            package_url=(
+                "https://github.com/spka/docker-tray/releases/download/v0.3.0/"
+                "docker-tray_0.3.0_all.deb"
+            ),
+            package_digest=f"sha256:{'0' * 64}",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(RuntimeError, "checksum"):
+                docker_tray.download_app_update(update, temp_dir)
+
+    @mock.patch.object(docker_tray, "download_app_update")
+    @mock.patch.object(docker_tray.subprocess, "run")
+    def test_app_upgrade_installs_downloaded_package_with_pkexec(self, run, download):
+        update = docker_tray.AppUpdate(
+            True,
+            latest_version="0.3.0",
+            package_url=(
+                "https://github.com/spka/docker-tray/releases/download/v0.3.0/"
+                "docker-tray_0.3.0_all.deb"
+            ),
+        )
+        download.return_value = docker_tray.Path("/tmp/docker-tray_0.3.0_all.deb")
+        run.return_value = subprocess.CompletedProcess([], 0)
+
+        result = docker_tray.run_app_upgrade(update)
+
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(
+            ["pkexec", "apt-get", "install", "-y", "/tmp/docker-tray_0.3.0_all.deb"],
+            run.call_args.args[0],
+        )
+
+    def test_successful_app_upgrade_stops_icon_for_restart(self):
+        icon = mock.Mock()
+        result = subprocess.CompletedProcess([], 0)
+
+        docker_tray.finish_app_upgrade(icon, result, None)
+
+        self.assertTrue(icon._restart_after_upgrade)
+        icon.stop.assert_called_once_with()
 
     @mock.patch.object(docker_tray, "update_tray_menu")
     def test_new_app_release_sends_only_one_desktop_notice(self, _update_menu):

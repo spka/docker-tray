@@ -7,7 +7,8 @@ It keeps common Docker chores out of the terminal: check which containers are
 running, start or stop them, restart a service, and open exposed web ports in
 your browser from the tray menu. It can also scan for compose files, bring a
 compose stack up, show Docker cleanup options, and flag Docker Engine or image
-updates.
+updates. On Debian and Ubuntu, Docker Tray can download, verify, and install its
+own release updates from the updates dialog.
 
 ## Why
 
@@ -34,16 +35,16 @@ Install the release package and run the packaged launcher:
 
 ```bash
 # Download the release package to /tmp.
-curl -L -o /tmp/docker-tray_0.2.2_all.deb https://github.com/spka/docker-tray/releases/download/v0.2.2/docker-tray_0.2.2_all.deb
+curl -L -o /tmp/docker-tray_0.2.3_all.deb https://github.com/spka/docker-tray/releases/download/v0.2.3/docker-tray_0.2.3_all.deb
 
 # Make the file readable by apt's sandbox user.
-chmod 0644 /tmp/docker-tray_0.2.2_all.deb
+chmod 0644 /tmp/docker-tray_0.2.3_all.deb
 
 # Install or upgrade Docker Tray.
-sudo apt install /tmp/docker-tray_0.2.2_all.deb
+sudo apt install /tmp/docker-tray_0.2.3_all.deb
 
 # Remove the temporary package file.
-rm /tmp/docker-tray_0.2.2_all.deb
+rm /tmp/docker-tray_0.2.3_all.deb
 ```
 
 Docker Tray starts automatically on login after installing the package.

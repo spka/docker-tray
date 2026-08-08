@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import fcntl
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -22,10 +24,12 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
+APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
 APP_UPDATE_TIMEOUT_SECONDS = 10
+APP_UPGRADE_TIMEOUT_SECONDS = 10 * 60
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Names}}\t"
@@ -105,6 +109,12 @@ class AppUpdate:
     available: bool
     latest_version: str = ""
     release_url: str = APP_RELEASES_URL
+    package_url: str = ""
+    package_digest: str = ""
+
+    @property
+    def can_install(self):
+        return bool(self.package_url) and PLATFORM_INFO.is_debian_family
 
 
 compose_scan_lock = threading.Lock()
@@ -135,6 +145,7 @@ updates_dialog = {
     "window": None,
     "content": None,
     "status": "",
+    "app_upgrading": False,
     "engine_upgrading": False,
     "pulling_images": set(),
 }
@@ -2201,11 +2212,92 @@ def check_app_update():
     release_url = release.get("html_url", "")
     if not release_url.startswith(f"{APP_RELEASES_URL}/"):
         release_url = f"{APP_RELEASES_URL}/tag/{tag_name}"
+
+    package_url = ""
+    package_digest = ""
+    expected_package_name = f"docker-tray_{latest_version}_all.deb"
+    for asset in release.get("assets") or []:
+        if asset.get("name") != expected_package_name:
+            continue
+        candidate_url = asset.get("browser_download_url", "")
+        if not candidate_url.startswith(APP_RELEASE_DOWNLOAD_URL_PREFIX):
+            continue
+        candidate_digest = asset.get("digest") or ""
+        if candidate_digest and not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", candidate_digest):
+            continue
+        package_url = candidate_url
+        package_digest = candidate_digest.lower()
+        break
     return AppUpdate(
         True,
         latest_version=latest_version,
         release_url=release_url,
+        package_url=package_url,
+        package_digest=package_digest,
     )
+
+
+def download_app_update(update, destination_dir):
+    if not update.package_url.startswith(APP_RELEASE_DOWNLOAD_URL_PREFIX):
+        raise RuntimeError("The release package URL is not trusted")
+
+    package_name = f"docker-tray_{update.latest_version}_all.deb"
+    package_path = Path(destination_dir) / package_name
+    request = Request(
+        update.package_url,
+        headers={"User-Agent": f"docker-tray/{APP_VERSION}"},
+    )
+    digest = hashlib.sha256()
+    with urlopen(request, timeout=APP_UPGRADE_TIMEOUT_SECONDS) as response:
+        with package_path.open("wb") as package_file:
+            while chunk := response.read(64 * 1024):
+                package_file.write(chunk)
+                digest.update(chunk)
+    package_path.chmod(0o644)
+
+    actual_digest = f"sha256:{digest.hexdigest()}"
+    if update.package_digest and actual_digest != update.package_digest:
+        package_path.unlink(missing_ok=True)
+        raise RuntimeError("The downloaded package checksum does not match the release")
+    validate_app_update_package(package_path, update.latest_version)
+    return package_path
+
+
+def validate_app_update_package(package_path, expected_version):
+    result = subprocess.run(
+        ["dpkg-deb", "--field", str(package_path), "Package", "Version", "Architecture"],
+        capture_output=True,
+        text=True,
+        timeout=APP_UPDATE_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "invalid Debian package"
+        raise RuntimeError(detail)
+    fields = {}
+    for line in result.stdout.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip()
+    if fields != {
+        "Package": "docker-tray",
+        "Version": expected_version,
+        "Architecture": "all",
+    }:
+        raise RuntimeError("The downloaded package metadata does not match the release")
+
+
+def run_app_upgrade(update):
+    if not update.can_install:
+        raise RuntimeError("Automatic Docker Tray upgrades are not available on this platform")
+    with tempfile.TemporaryDirectory(prefix="docker-tray-update-") as temp_dir:
+        Path(temp_dir).chmod(0o755)
+        package_path = download_app_update(update, temp_dir)
+        return subprocess.run(
+            ["pkexec", "apt-get", "install", "-y", str(package_path)],
+            capture_output=True,
+            text=True,
+            timeout=APP_UPGRADE_TIMEOUT_SECONDS,
+        )
 
 
 def check_image_updates():
@@ -2296,7 +2388,11 @@ def poll_updates(icon):
 def clear_updates_dialog():
     updates_dialog["window"] = None
     updates_dialog["content"] = None
-    if not updates_dialog["engine_upgrading"] and not updates_dialog["pulling_images"]:
+    if (
+        not updates_dialog["app_upgrading"]
+        and not updates_dialog["engine_upgrading"]
+        and not updates_dialog["pulling_images"]
+    ):
         updates_dialog["status"] = ""
     return GLib.SOURCE_REMOVE
 
@@ -2337,8 +2433,62 @@ def set_updates_dialog_content(content):
     window.present()
 
 
+def start_app_upgrade(icon):
+    if (
+        updates_dialog["app_upgrading"]
+        or updates_dialog["engine_upgrading"]
+        or updates_dialog["pulling_images"]
+    ):
+        return
+    app_update = get_app_update_snapshot()
+    if not app_update.can_install:
+        return
+    updates_dialog["app_upgrading"] = True
+    updates_dialog["status"] = f"Downloading Docker Tray {app_update.latest_version}..."
+    show_updates_dialog(icon)
+
+    def _upgrade():
+        try:
+            result = run_app_upgrade(app_update)
+        except Exception as error:
+            GLib.idle_add(finish_app_upgrade, icon, None, error)
+            return
+        GLib.idle_add(finish_app_upgrade, icon, result, None)
+
+    threading.Thread(target=_upgrade, daemon=True).start()
+
+
+def finish_app_upgrade(icon, result, error):
+    updates_dialog["app_upgrading"] = False
+    if error is not None:
+        if isinstance(error, subprocess.TimeoutExpired):
+            detail = "timed out"
+        else:
+            detail = f"{type(error).__name__}: {error}"
+        updates_dialog["status"] = f"Docker Tray upgrade failed: {detail}"
+        if updates_dialog["window"] is not None:
+            show_updates_dialog(icon)
+        return GLib.SOURCE_REMOVE
+
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "upgrade command failed"
+        updates_dialog["status"] = f"Docker Tray upgrade failed: {detail}"
+        if updates_dialog["window"] is not None:
+            show_updates_dialog(icon)
+        return GLib.SOURCE_REMOVE
+
+    updates_dialog["status"] = "Docker Tray upgraded. Restarting..."
+    icon._restart_after_upgrade = True
+    icon.stop()
+    return GLib.SOURCE_REMOVE
+
+
 def start_docker_engine_upgrade(icon):
-    if updates_dialog["engine_upgrading"]:
+    if (
+        updates_dialog["app_upgrading"]
+        or updates_dialog["engine_upgrading"]
+        or updates_dialog["pulling_images"]
+    ):
         return
     updates_dialog["engine_upgrading"] = True
     updates_dialog["status"] = "Upgrading Docker Engine..."
@@ -2456,7 +2606,11 @@ def run_image_compose_pull_safely(
 
 
 def start_image_compose_pull(button, icon, image):
-    if updates_dialog["pulling_images"]:
+    if (
+        updates_dialog["app_upgrading"]
+        or updates_dialog["engine_upgrading"]
+        or updates_dialog["pulling_images"]
+    ):
         return
     updates_dialog["status"] = f"Pulling {image}..."
     updates_dialog["pulling_images"].add(image)
@@ -2509,7 +2663,11 @@ def finish_all_image_pulls(
 
 
 def start_all_image_compose_pulls(icon):
-    if updates_dialog["pulling_images"]:
+    if (
+        updates_dialog["app_upgrading"]
+        or updates_dialog["engine_upgrading"]
+        or updates_dialog["pulling_images"]
+    ):
         return
     _engine_update, image_updates = get_update_state_snapshot()
     if not image_updates:
@@ -2648,6 +2806,11 @@ def show_updates_dialog(icon):
 
     app_update = get_app_update_snapshot()
     engine_update, image_updates = get_update_state_snapshot()
+    update_action_running = (
+        updates_dialog["app_upgrading"]
+        or updates_dialog["engine_upgrading"]
+        or bool(updates_dialog["pulling_images"])
+    )
     if app_update.available:
         app_label = Gtk.Label(label="Docker Tray update available")
         app_label.set_xalign(0)
@@ -2657,12 +2820,22 @@ def show_updates_dialog(icon):
         version_label.set_xalign(0)
         box.pack_start(version_label, False, False, 0)
 
-        release_button = Gtk.Button(label="Open release")
-        release_button.connect(
-            "clicked",
-            lambda button, url=app_update.release_url: open_uri(url),
-        )
-        box.pack_start(release_button, False, False, 0)
+        if app_update.can_install:
+            app_upgrading = updates_dialog["app_upgrading"]
+            install_button = Gtk.Button(
+                label="Installing..." if app_upgrading else "Install update",
+            )
+            install_button.set_sensitive(not update_action_running)
+            if not update_action_running:
+                install_button.connect("clicked", lambda button: start_app_upgrade(icon))
+            box.pack_start(install_button, False, False, 0)
+        else:
+            release_button = Gtk.Button(label="Open release")
+            release_button.connect(
+                "clicked",
+                lambda button, url=app_update.release_url: open_uri(url),
+            )
+            box.pack_start(release_button, False, False, 0)
 
     if engine_update.available:
         engine_label = Gtk.Label(label=f"{engine_update.package_name} update available")
@@ -2677,8 +2850,9 @@ def show_updates_dialog(icon):
             upgrade_button = Gtk.Button(
                 label="Upgrading..." if engine_upgrading else engine_update.upgrade_label,
             )
-            upgrade_button.set_sensitive(not engine_upgrading)
-            upgrade_button.connect("clicked", lambda b: start_docker_engine_upgrade(icon))
+            upgrade_button.set_sensitive(not update_action_running)
+            if not update_action_running:
+                upgrade_button.connect("clicked", lambda b: start_docker_engine_upgrade(icon))
             box.pack_start(upgrade_button, False, False, 0)
         else:
             detail = Gtk.Label(label="Use your system package manager to upgrade Docker.")
@@ -2693,8 +2867,8 @@ def show_updates_dialog(icon):
         update_all_button = Gtk.Button(
             label="Updating all..." if pull_in_progress else "Update + cleanup all",
         )
-        update_all_button.set_sensitive(not pull_in_progress)
-        if not pull_in_progress:
+        update_all_button.set_sensitive(not update_action_running)
+        if not update_action_running:
             update_all_button.connect("clicked", lambda button: start_all_image_compose_pulls(icon))
         box.pack_start(update_all_button, False, False, 0)
         for image in image_updates:
@@ -2705,8 +2879,8 @@ def show_updates_dialog(icon):
             image_label.set_hexpand(True)
             image_label.set_line_wrap(True)
             pull_button = Gtk.Button(label="Pulling" if is_pulling else "Update + cleanup")
-            pull_button.set_sensitive(not pull_in_progress)
-            if not pull_in_progress:
+            pull_button.set_sensitive(not update_action_running)
+            if not update_action_running:
                 pull_button.connect(
                     "clicked",
                     lambda button, pull_image=image: start_image_compose_pull(button, icon, pull_image),
@@ -2718,7 +2892,15 @@ def show_updates_dialog(icon):
     if updates_dialog["status"]:
         status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         if updates_dialog["status"].startswith(
-            ("Pulling ", "Restarting ", "Waiting ", "Upgrading ", "Removing "),
+            (
+                "Downloading ",
+                "Installing ",
+                "Pulling ",
+                "Restarting ",
+                "Waiting ",
+                "Upgrading ",
+                "Removing ",
+            ),
         ):
             spinner = Gtk.Spinner()
             spinner.start()
@@ -2837,6 +3019,8 @@ def main():
         icon.run(setup=start_menu_polling)
     finally:
         instance_lock.close()
+    if getattr(icon, "_restart_after_upgrade", False):
+        os.execvp("docker-tray", ["docker-tray"])
 
 
 if __name__ == "__main__":
