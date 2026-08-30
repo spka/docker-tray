@@ -2,7 +2,6 @@ import json
 import tempfile
 import time
 import unittest
-from collections import deque
 from pathlib import Path
 from unittest import mock
 
@@ -23,11 +22,7 @@ class StatsHistoryTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def reset_cache(self):
-        docker_tray.stats_history_cache.update({
-            "initialized": False,
-            "peaks": {},
-            "recent": deque(),
-        })
+        docker_tray.stats_history_state.reset()
 
     def write_entries(self, entries):
         with self.stats_file.open("w") as history_file:
@@ -69,7 +64,7 @@ class StatsHistoryTests(unittest.TestCase):
 
         entries = [json.loads(line) for line in self.stats_file.read_text().splitlines()]
         self.assertEqual([recent_entry], entries)
-        self.assertFalse(docker_tray.stats_history_cache["initialized"])
+        self.assertFalse(docker_tray.stats_history_state.initialized)
 
     def test_current_low_sample_breaks_an_earlier_high_cpu_streak(self):
         history = [

@@ -38,12 +38,13 @@ class AppUpdateTests(unittest.TestCase):
         self.original_feedback = docker_tray.get_update_feedback_snapshot()
 
     def tearDown(self):
-        docker_tray.update_check_state.update({
-            "app_update": self.original_app_update,
-            "engine_update": self.original_engine_update,
-            "image_updates": self.original_image_updates,
-            **self.original_feedback,
-        })
+        state = docker_tray.update_check_state
+        state.app_update = self.original_app_update
+        state.engine_update = self.original_engine_update
+        state.image_updates = self.original_image_updates
+        state.checking = self.original_feedback["checking"]
+        state.last_checked = self.original_feedback["last_checked"]
+        state.errors = self.original_feedback["errors"]
 
     def test_version_comparison_normalizes_two_and_three_part_versions(self):
         self.assertEqual((0, 2, 0), docker_tray.parse_app_version("0.2"))
@@ -192,7 +193,7 @@ class AppUpdateTests(unittest.TestCase):
         self.assertEqual(
             [
                 "pkexec",
-                docker_tray.PRIVILEGED_HELPER,
+                str(docker_tray.docker_tray_runtime.PRIVILEGED_HELPER),
                 "install-update",
                 "/tmp/docker-tray_0.3.0_all.deb",
                 "0.3.0",
@@ -256,7 +257,7 @@ class AppUpdateTests(unittest.TestCase):
             latest_version="0.3.0",
             release_url="https://github.com/spka/docker-tray/releases/tag/v0.3.0",
         )
-        docker_tray.update_check_state["app_update"] = existing
+        docker_tray.update_check_state.app_update = existing
         check_engine.return_value = self.original_engine_update
 
         docker_tray.run_update_check(mock.Mock())
@@ -268,18 +269,14 @@ class AppUpdateTests(unittest.TestCase):
         self.assertIn("offline", feedback["errors"][0])
 
     def test_update_feedback_distinguishes_checking_and_incomplete(self):
-        docker_tray.update_check_state.update({
-            "checking": True,
-            "last_checked": None,
-            "errors": (),
-        })
+        docker_tray.update_check_state.checking = True
+        docker_tray.update_check_state.last_checked = None
+        docker_tray.update_check_state.errors = ()
         self.assertEqual("Checking for updates…", docker_tray.get_update_check_label())
 
-        docker_tray.update_check_state.update({
-            "checking": False,
-            "last_checked": 100,
-            "errors": ("registry offline",),
-        })
+        docker_tray.update_check_state.checking = False
+        docker_tray.update_check_state.last_checked = 100
+        docker_tray.update_check_state.errors = ("registry offline",)
         with mock.patch.object(docker_tray.time, "time", return_value=160):
             self.assertEqual(
                 "Update check incomplete (1 minute ago)",

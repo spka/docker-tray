@@ -46,7 +46,7 @@ jobs:
       - name: Run tests and static validation
         run: |
           python3 -m unittest discover -s tests -v
-          python3 -m py_compile docker_tray.py docker_tray_platform.py docker_tray_privileged.py
+          python3 -m py_compile docker_tray*.py
           sh -n docker-tray-docker package-deb.sh scripts/release-version
 
       - name: Build and inspect Debian package

@@ -28,7 +28,7 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Validate scripts and desktop files
         run: |
-          python3 -m py_compile docker_tray.py docker_tray_platform.py docker_tray_privileged.py
+          python3 -m py_compile docker_tray*.py
           sh -n docker-tray-docker package-deb.sh scripts/release-version
       - name: Build Debian package
         run: |

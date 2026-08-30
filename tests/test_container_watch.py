@@ -6,17 +6,17 @@ import docker_tray
 
 class ContainerWatchTests(unittest.TestCase):
     def setUp(self):
-        with docker_tray.container_watch_lock:
-            self.original = dict(docker_tray.container_watch_state)
-            docker_tray.container_watch_state.update({
-                "ready": False,
-                "containers": (),
-                "error": None,
-            })
+        state = docker_tray.container_watch_state
+        with state.lock:
+            self.original = (state.ready, state.containers, state.error)
+            state.ready = False
+            state.containers = ()
+            state.error = None
 
     def tearDown(self):
-        with docker_tray.container_watch_lock:
-            docker_tray.container_watch_state.update(self.original)
+        state = docker_tray.container_watch_state
+        with state.lock:
+            state.ready, state.containers, state.error = self.original
 
     def test_parses_container_snapshot(self):
         containers, error = docker_tray.parse_container_watch_message(json.dumps({

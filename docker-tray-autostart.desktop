@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Docker Tray
+Exec=systemctl --user start docker-tray.service
+Icon=/usr/share/docker-tray/icon-light.png
+Comment=Docker container monitor in the system tray
+Categories=Utility;
+Terminal=false
+Hidden=false
+X-GNOME-Autostart-enabled=true

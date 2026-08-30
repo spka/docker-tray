@@ -37,7 +37,7 @@ class DockerActionTests(unittest.TestCase):
 
         self.assertEqual("cleaned", docker_tray.run_docker_cleanup())
         run.assert_called_once_with(
-            ["pkexec", docker_tray.PRIVILEGED_HELPER, "cleanup"],
+            docker_tray.docker_tray_runtime.privileged_command("cleanup"),
             capture_output=True,
             text=True,
             timeout=4 * docker_tray.DOCKER_CMD_TIMEOUT_SECONDS,

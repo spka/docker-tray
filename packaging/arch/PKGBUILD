@@ -35,25 +35,40 @@ package() {
   local source_root="${srcdir}/${pkgname}-${pkgver}"
 
   install -Dm755 "${source_root}/docker_tray.py" "${pkgdir}/usr/lib/docker-tray/docker_tray.py"
-  install -Dm644 "${source_root}/docker_tray_platform.py" "${pkgdir}/usr/lib/docker-tray/docker_tray_platform.py"
   install -Dm755 "${source_root}/docker_tray_privileged.py" "${pkgdir}/usr/lib/docker-tray/docker_tray_privileged.py"
+  local module
+  for module in "${source_root}"/docker_tray_*.py; do
+    [[ "${module}" == */docker_tray_privileged.py ]] && continue
+    install -Dm644 "${module}" "${pkgdir}/usr/lib/docker-tray/${module##*/}"
+  done
   install -Dm755 "${source_root}/docker-tray-docker" "${pkgdir}/usr/lib/docker-tray/docker"
   install -Dm644 "${source_root}/com.github.spka.docker-tray.policy" "${pkgdir}/usr/share/polkit-1/actions/com.github.spka.docker-tray.policy"
-  install -Dm644 "${srcdir}/docker-tray.service" "${pkgdir}/usr/lib/systemd/user/docker-tray.service"
+  local service_source="${srcdir}/docker-tray.service"
+  if [[ -f "${source_root}/docker-tray.service" ]]; then
+    service_source="${source_root}/docker-tray.service"
+  fi
+  install -Dm644 "${service_source}" "${pkgdir}/usr/lib/systemd/user/docker-tray.service"
   install -Dm644 "${source_root}/icon-dark.png" "${pkgdir}/usr/share/docker-tray/icon-dark.png"
   install -Dm644 "${source_root}/icon-light.png" "${pkgdir}/usr/share/docker-tray/icon-light.png"
   install -Dm644 "${source_root}/icon-light.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/docker-tray.png"
   install -Dm644 "${source_root}/README.md" "${pkgdir}/usr/share/doc/docker-tray/README.md"
   install -Dm644 "${source_root}/LICENSE" "${pkgdir}/usr/share/licenses/docker-tray/LICENSE"
 
-  install -Dm755 /dev/stdin "${pkgdir}/usr/bin/docker-tray" <<'WRAPPER'
+  if [[ -f "${source_root}/docker-tray-launcher" ]]; then
+    install -Dm755 "${source_root}/docker-tray-launcher" "${pkgdir}/usr/bin/docker-tray"
+  else
+    install -Dm755 /dev/stdin "${pkgdir}/usr/bin/docker-tray" <<'WRAPPER'
 #!/usr/bin/env sh
 PATH=/usr/lib/docker-tray:$PATH
 export PATH
 exec python3 /usr/lib/docker-tray/docker_tray.py "$@"
 WRAPPER
+  fi
 
-  install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/docker-tray.desktop" <<'DESKTOP'
+  if [[ -f "${source_root}/docker-tray.desktop" ]]; then
+    install -Dm644 "${source_root}/docker-tray.desktop" "${pkgdir}/usr/share/applications/docker-tray.desktop"
+  else
+    install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/docker-tray.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=Docker Tray
@@ -63,8 +78,12 @@ Comment=Docker container monitor in the system tray
 Categories=Utility;
 Terminal=false
 DESKTOP
+  fi
 
-  install -Dm644 /dev/stdin "${pkgdir}/etc/xdg/autostart/docker-tray.desktop" <<'DESKTOP'
+  if [[ -f "${source_root}/docker-tray-autostart.desktop" ]]; then
+    install -Dm644 "${source_root}/docker-tray-autostart.desktop" "${pkgdir}/etc/xdg/autostart/docker-tray.desktop"
+  else
+    install -Dm644 /dev/stdin "${pkgdir}/etc/xdg/autostart/docker-tray.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=Docker Tray
@@ -76,4 +95,5 @@ Terminal=false
 Hidden=false
 X-GNOME-Autostart-enabled=true
 DESKTOP
+  fi
 }

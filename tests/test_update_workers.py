@@ -22,30 +22,24 @@ def run_idle_callback(callback, *args):
 class UpdateWorkerTests(unittest.TestCase):
     def setUp(self):
         self.original_update_state = docker_tray.get_update_state_snapshot()
-        docker_tray.remote_digest_cache.clear()
-        docker_tray.updates_dialog.update({
-            "window": None,
-            "content": None,
-            "status": "",
-            "engine_upgrading": False,
-            "pulling_images": set(),
-        })
+        docker_tray.remote_digest_cache.values.clear()
+        docker_tray.updates_dialog.clear()
+        docker_tray.updates_dialog_state.status = ""
+        docker_tray.updates_dialog_state.app_upgrading = False
+        docker_tray.updates_dialog_state.engine_upgrading = False
+        docker_tray.updates_dialog_state.pulling_images.clear()
         self.engine_update = docker_tray_platform.EngineUpdate(
             True,
             package_name="Docker CE",
             upgrade_command=("test-upgrade",),
         )
-        docker_tray.update_check_state.update({
-            "engine_update": self.engine_update,
-            "image_updates": ["example:latest"],
-        })
+        docker_tray.update_check_state.engine_update = self.engine_update
+        docker_tray.update_check_state.image_updates = ["example:latest"]
 
     def tearDown(self):
         engine_update, image_updates = self.original_update_state
-        docker_tray.update_check_state.update({
-            "engine_update": engine_update,
-            "image_updates": image_updates,
-        })
+        docker_tray.update_check_state.engine_update = engine_update
+        docker_tray.update_check_state.image_updates = image_updates
 
     @mock.patch.object(docker_tray, "show_updates_dialog")
     @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)
@@ -63,8 +57,8 @@ class UpdateWorkerTests(unittest.TestCase):
     ):
         docker_tray.start_docker_engine_upgrade(mock.Mock())
 
-        self.assertFalse(docker_tray.updates_dialog["engine_upgrading"])
-        self.assertIn("pkexec was not found", docker_tray.updates_dialog["status"])
+        self.assertFalse(docker_tray.updates_dialog_state.engine_upgrading)
+        self.assertIn("pkexec was not found", docker_tray.updates_dialog_state.status)
 
     @mock.patch.object(docker_tray, "show_updates_dialog")
     @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)
@@ -83,8 +77,8 @@ class UpdateWorkerTests(unittest.TestCase):
         image = "example:latest"
         docker_tray.start_image_compose_pull(mock.Mock(), mock.Mock(), image)
 
-        self.assertNotIn(image, docker_tray.updates_dialog["pulling_images"])
-        self.assertIn("Docker inspect failed", docker_tray.updates_dialog["status"])
+        self.assertNotIn(image, docker_tray.updates_dialog_state.pulling_images)
+        self.assertIn("Docker inspect failed", docker_tray.updates_dialog_state.status)
 
     @mock.patch.object(docker_tray_platform.subprocess, "run")
     def test_engine_upgrade_has_a_timeout(self, run):
@@ -106,11 +100,11 @@ class UpdateWorkerTests(unittest.TestCase):
         check_engine,
         check_app,
     ):
-        docker_tray.update_check_run_lock.acquire()
+        docker_tray.update_check_state.run_lock.acquire()
         try:
             docker_tray.run_update_check(mock.Mock())
         finally:
-            docker_tray.update_check_run_lock.release()
+            docker_tray.update_check_state.run_lock.release()
 
         check_app.assert_not_called()
         check_engine.assert_not_called()
@@ -231,10 +225,10 @@ class UpdateWorkerTests(unittest.TestCase):
             "two:latest": "sha256:two",
         }, result)
         run.assert_called_once_with(
-            [
-                "docker", "image", "inspect", "--format", "{{.Id}}",
+            docker_tray.docker_tray_runtime.docker_command(
+                "image", "inspect", "--format", "{{.Id}}",
                 "one:latest", "two:latest",
-            ],
+            ),
             capture_output=True,
             text=True,
             timeout=docker_tray.DOCKER_CMD_TIMEOUT_SECONDS,
@@ -295,7 +289,7 @@ class UpdateWorkerTests(unittest.TestCase):
         run.assert_called_once_with(
             [
                 "pkexec",
-                docker_tray.PRIVILEGED_HELPER,
+                str(docker_tray.docker_tray_runtime.PRIVILEGED_HELPER),
                 "image-update",
                 "one:latest",
                 "two:latest",
@@ -318,7 +312,7 @@ class UpdateWorkerTests(unittest.TestCase):
         _show_dialog,
     ):
         images = ["one:latest", "two:latest"]
-        docker_tray.update_check_state["image_updates"] = images
+        docker_tray.update_check_state.image_updates = images
         run_updates.return_value = {
             "one:latest": {
                 "success": True, "removed_image_count": 1, "cleanup_error": "",
@@ -332,10 +326,10 @@ class UpdateWorkerTests(unittest.TestCase):
         docker_tray.start_all_image_compose_pulls(icon)
 
         run_updates.assert_called_once_with(images)
-        self.assertEqual(set(), docker_tray.updates_dialog["pulling_images"])
+        self.assertEqual(set(), docker_tray.updates_dialog_state.pulling_images)
         self.assertEqual(
             "Updated and cleaned up all 2 images. Removed 3 replaced images.",
-            docker_tray.updates_dialog["status"],
+            docker_tray.updates_dialog_state.status,
         )
         self.assertEqual([], docker_tray.get_update_state_snapshot()[1])
         run_update_check.assert_called_once_with(icon)
@@ -352,7 +346,7 @@ class UpdateWorkerTests(unittest.TestCase):
         _run_update_check,
         _show_dialog,
     ):
-        docker_tray.update_check_state["image_updates"] = ["broken:latest", "working:latest"]
+        docker_tray.update_check_state.image_updates = ["broken:latest", "working:latest"]
         run_updates.return_value = {
             "broken:latest": {
                 "success": False,
@@ -371,14 +365,14 @@ class UpdateWorkerTests(unittest.TestCase):
         docker_tray.start_all_image_compose_pulls(mock.Mock())
 
         run_updates.assert_called_once_with(["broken:latest", "working:latest"])
-        self.assertIn("1 of 2 images updated", docker_tray.updates_dialog["status"])
-        self.assertIn("broken:latest: Pull failed", docker_tray.updates_dialog["status"])
+        self.assertIn("1 of 2 images updated", docker_tray.updates_dialog_state.status)
+        self.assertIn("broken:latest: Pull failed", docker_tray.updates_dialog_state.status)
         self.assertEqual(["broken:latest"], docker_tray.get_update_state_snapshot()[1])
 
     @mock.patch.object(docker_tray, "show_updates_dialog")
     @mock.patch.object(docker_tray.threading, "Thread")
     def test_update_all_does_not_start_while_an_update_is_running(self, thread, show_dialog):
-        docker_tray.updates_dialog["pulling_images"] = {"already-running:latest"}
+        docker_tray.updates_dialog_state.pulling_images = {"already-running:latest"}
 
         docker_tray.start_all_image_compose_pulls(mock.Mock())
 

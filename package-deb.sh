@@ -37,49 +37,25 @@ Description: Small Docker tray utility
 CONTROL
 
 install -m 0755 docker_tray.py "$root/usr/lib/docker-tray/docker_tray.py"
-install -m 0644 docker_tray_platform.py "$root/usr/lib/docker-tray/docker_tray_platform.py"
-install -m 0755 docker_tray_privileged.py "$root/usr/lib/docker-tray/docker_tray_privileged.py"
+for module in docker_tray_*.py; do
+  mode=0644
+  if [[ "$module" == "docker_tray_privileged.py" ]]; then
+    mode=0755
+  fi
+  install -m "$mode" "$module" "$root/usr/lib/docker-tray/$module"
+done
 install -m 0755 docker-tray-docker "$root/usr/lib/docker-tray/docker"
 install -m 0644 com.github.spka.docker-tray.policy \
   "$root/usr/share/polkit-1/actions/com.github.spka.docker-tray.policy"
-cat > "$root/usr/bin/docker-tray" <<'WRAPPER'
-#!/usr/bin/env sh
-PATH=/usr/lib/docker-tray:$PATH
-export PATH
-exec python3 /usr/lib/docker-tray/docker_tray.py "$@"
-WRAPPER
-chmod 0755 "$root/usr/bin/docker-tray"
+install -m 0755 docker-tray-launcher "$root/usr/bin/docker-tray"
 install -m 0644 icon-dark.png icon-light.png "$root/usr/share/docker-tray/"
 install -m 0644 icon-light.png "$root/usr/share/icons/hicolor/256x256/apps/docker-tray.png"
 install -m 0644 README.md "$root/usr/share/doc/docker-tray/README.md"
 install -m 0644 LICENSE "$root/usr/share/doc/docker-tray/copyright"
 install -m 0644 docker-tray.service "$root/usr/lib/systemd/user/docker-tray.service"
 
-cat > "$root/usr/share/applications/docker-tray.desktop" <<DESKTOP
-[Desktop Entry]
-Type=Application
-Name=Docker Tray
-Exec=systemctl --user start docker-tray.service
-Icon=/usr/share/docker-tray/icon-light.png
-Comment=Docker container monitor in the system tray
-Categories=Utility;
-Terminal=false
-DESKTOP
-chmod 0644 "$root/usr/share/applications/docker-tray.desktop"
-
-cat > "$root/etc/xdg/autostart/docker-tray.desktop" <<DESKTOP
-[Desktop Entry]
-Type=Application
-Name=Docker Tray
-Exec=systemctl --user start docker-tray.service
-Icon=/usr/share/docker-tray/icon-light.png
-Comment=Docker container monitor in the system tray
-Categories=Utility;
-Terminal=false
-Hidden=false
-X-GNOME-Autostart-enabled=true
-DESKTOP
-chmod 0644 "$root/etc/xdg/autostart/docker-tray.desktop"
+install -m 0644 docker-tray.desktop "$root/usr/share/applications/docker-tray.desktop"
+install -m 0644 docker-tray-autostart.desktop "$root/etc/xdg/autostart/docker-tray.desktop"
 
 find "$root" -type d -exec chmod 0755 {} +
 dpkg-deb --root-owner-group --build "$root" "dist/${package}_${version}_all.deb"

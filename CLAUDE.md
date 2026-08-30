@@ -11,6 +11,13 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 ## Files
 
 - `docker_tray.py` - main app.
+- `docker_tray_runtime.py` - explicit Docker and PolicyKit command paths.
+- `docker_tray_state.py` - typed mutable process state.
+- `docker_tray_ui.py` - shared GTK dialog lifecycle.
+- `docker_tray_compose.py` - filesystem-only Compose discovery helpers.
+- `docker_tray_stats.py` - pure stats parsing, formatting, and health logic.
+- `docker_tray_updates.py` - pure release and image-update helpers.
+- `docker_tray_autostart.py` - XDG autostart file handling.
 - `docker_tray_platform.py` - distro/desktop detection, install URLs, Docker
   Engine update providers, and theme detection.
 - `icon-dark.png` - tray icon for dark panels (white badge, 256×256).
@@ -27,8 +34,9 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 - `Pillow` - loads the tray icon PNG.
 - `GTK3` via `gi.repository.Gtk`, `GLib`, and `Gio` - required for Wayland-aware
   URL opening and light/dark theme detection.
-- Python stdlib `subprocess` - Docker interaction through the packaged,
-  root-owned PolicyKit broker and its narrow command allowlist.
+- Python stdlib `subprocess` - Docker interaction through the explicit gateway
+  in `docker_tray_runtime.py`, backed by the packaged root-owned PolicyKit
+  broker and its narrow command allowlist.
 - `~/.config/autostart/docker-tray.desktop` - managed by the tray menu's
   `Settings -> Start at boot` toggle.
 
