@@ -65,4 +65,16 @@
     <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/docker-tray/docker_tray_privileged.py</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">install-update</annotate>
   </action>
+
+  <action id="com.github.spka.docker-tray.image-update">
+    <description>Update Docker Compose images</description>
+    <message>Authentication is required to update Docker Compose services</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/docker-tray/docker_tray_privileged.py</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">image-update</annotate>
+  </action>
 </policyconfig>

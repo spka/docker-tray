@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -24,7 +25,7 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.7"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
@@ -39,22 +40,6 @@ DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Label \"com.docker.compose.project.config_files\"}}\t"
     "{{.Label \"com.docker.compose.project.working_dir\"}}"
 )
-DOCKER_INSPECT_COMPOSE_LABEL_FORMAT = (
-    "{{.Config.Image}}\t"
-    "{{.Image}}\t"
-    "{{index .Config.Labels \"com.docker.compose.project.config_files\"}}\t"
-    "{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}\t"
-    "{{index .Config.Labels \"com.docker.compose.service\"}}"
-)
-DOCKER_INSPECT_COMPOSE_STATE_FORMAT = (
-    "{{.Config.Image}}\t"
-    "{{.Image}}\t"
-    "{{.State.Running}}\t"
-    "{{if .State.Health}}{{.State.Health.Status}}{{end}}\t"
-    "{{index .Config.Labels \"com.docker.compose.project.config_files\"}}\t"
-    "{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}\t"
-    "{{index .Config.Labels \"com.docker.compose.service\"}}"
-)
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
 COMPOSE_START_POLL_SECONDS = 2
@@ -62,11 +47,12 @@ COMPOSE_START_POLL_ATTEMPTS = 30
 UPDATE_CHECK_INTERVAL_SECONDS = 3600
 DOCKER_CMD_TIMEOUT_SECONDS = 15
 DOCKER_MANIFEST_TIMEOUT_SECONDS = 30
-DOCKER_COMPOSE_PULL_TIMEOUT_SECONDS = 10 * 60
 DOCKER_COMPOSE_UP_TIMEOUT_SECONDS = 3 * 60
 DOCKER_ENGINE_UPGRADE_TIMEOUT_SECONDS = 30 * 60
-DOCKER_COMPOSE_RESTART_SETTLE_SECONDS = 60
-DOCKER_COMPOSE_RESTART_POLL_SECONDS = 2
+DOCKER_IMAGE_UPDATE_TIMEOUT_SECONDS = 15 * 60
+REMOTE_DIGEST_CACHE_SECONDS = 15 * 60
+REMOTE_DIGEST_FAILURE_CACHE_SECONDS = 2 * 60
+REMOTE_DIGEST_WORKERS = 4
 COMMAND_ERROR_DETAIL_MAX_CHARS = 500
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
@@ -147,6 +133,9 @@ update_check_state = {
     "image_updates": [],
 }
 update_check_lock = threading.Lock()
+update_check_run_lock = threading.Lock()
+remote_digest_cache_lock = threading.Lock()
+remote_digest_cache = {}
 updates_dialog = {
     "window": None,
     "content": None,
@@ -440,41 +429,6 @@ def run_docker_capture(args, check=True):
     )
 
 
-def run_compose_pull(config_files, service, working_dir):
-    return run_compose_service_command(
-        config_files,
-        service,
-        working_dir,
-        "pull",
-        DOCKER_COMPOSE_PULL_TIMEOUT_SECONDS,
-    )
-
-
-def run_compose_service_up(config_files, service, working_dir):
-    return run_compose_service_command(
-        config_files,
-        service,
-        working_dir,
-        "up",
-        DOCKER_COMPOSE_UP_TIMEOUT_SECONDS,
-        "-d",
-    )
-
-
-def run_compose_service_command(config_files, service, working_dir, action, timeout, *action_args):
-    command = ["docker", "compose"]
-    for config_file in config_files:
-        command += ["-f", str(config_file)]
-    command += [action, *action_args, service]
-    return subprocess.run(
-        command,
-        cwd=working_dir or None,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-
-
 def should_skip_compose_scan_dir(root, dirname):
     path = Path(root, dirname)
     try:
@@ -507,24 +461,6 @@ def scan_compose_files(root=Path.home()):
 
 def normalize_compose_path(path):
     return Path(path).expanduser().resolve(strict=False)
-
-
-def resolve_compose_config_files(config_files, working_dir):
-    resolved = []
-    for config_file in config_files.split(","):
-        config_file = config_file.strip()
-        if not config_file:
-            continue
-        config_path = Path(config_file)
-        if not config_path.is_absolute() and working_dir:
-            config_path = Path(working_dir, config_path)
-        resolved.append(normalize_compose_path(config_path))
-    return tuple(resolved)
-
-
-def normalize_docker_template_value(value):
-    value = value.strip()
-    return "" if value == "<no value>" else value
 
 
 def get_compose_file_states_from_containers():
@@ -561,112 +497,6 @@ def get_compose_file_states_from_containers():
             )
 
     return compose_states
-
-
-def get_compose_pull_targets_for_image(image):
-    ids_result = run_docker_capture(["docker", "ps", "-a", "-q"], check=False)
-    container_ids = sorted(output_line_set(ids_result.stdout))
-    if not container_ids:
-        return []
-
-    result = run_docker_capture([
-        "docker",
-        "inspect",
-        "--format",
-        DOCKER_INSPECT_COMPOSE_LABEL_FORMAT,
-        *container_ids,
-    ], check=False)
-    targets = []
-    seen = set()
-
-    for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 4)
-        if len(parts) < 5:
-            continue
-        config_image, container_image_id, config_files, working_dir, service = (
-            normalize_docker_template_value(part) for part in parts
-        )
-        if image not in {config_image, container_image_id} or not config_files or not service:
-            continue
-
-        resolved_config_files = resolve_compose_config_files(config_files, working_dir)
-        if not resolved_config_files:
-            continue
-
-        key = (resolved_config_files, working_dir, service)
-        if key in seen:
-            continue
-        seen.add(key)
-        targets.append((resolved_config_files, service, working_dir))
-
-    return targets
-
-
-def get_compose_service_states(config_files, service, working_dir):
-    ids_result = run_docker_capture(["docker", "ps", "-a", "-q"], check=False)
-    container_ids = sorted(output_line_set(ids_result.stdout))
-    if not container_ids:
-        return []
-
-    expected_config_files = tuple(normalize_compose_path(path) for path in config_files)
-    result = run_docker_capture([
-        "docker",
-        "inspect",
-        "--format",
-        DOCKER_INSPECT_COMPOSE_STATE_FORMAT,
-        *container_ids,
-    ], check=False)
-    states = []
-    for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 6)
-        if len(parts) < 7:
-            continue
-        (
-            config_image,
-            container_image_id,
-            running,
-            health,
-            container_config_files,
-            container_working_dir,
-            container_service,
-        ) = (normalize_docker_template_value(part) for part in parts)
-        if (
-            resolve_compose_config_files(container_config_files, container_working_dir) != expected_config_files
-            or container_working_dir != working_dir
-            or container_service != service
-        ):
-            continue
-        states.append({
-            "config_image": config_image,
-            "container_image_id": container_image_id,
-            "running": running == "true",
-            "health": health,
-        })
-    return states
-
-
-def compose_service_state_is_ready(states):
-    if not states:
-        return False
-    for state in states:
-        if not state["running"]:
-            return False
-        health = state["health"]
-        if health and health != "healthy":
-            return False
-        local_image_id = get_local_image_id(state["config_image"])
-        if local_image_id and state["container_image_id"] != local_image_id:
-            return False
-    return True
-
-
-def wait_for_compose_service_ready(config_files, service, working_dir):
-    deadline = time.time() + DOCKER_COMPOSE_RESTART_SETTLE_SECONDS
-    while time.time() < deadline:
-        if compose_service_state_is_ready(get_compose_service_states(config_files, service, working_dir)):
-            return True
-        time.sleep(DOCKER_COMPOSE_RESTART_POLL_SECONDS)
-    return False
 
 
 def get_scanned_compose_files_with_states(root):
@@ -2190,31 +2020,6 @@ def get_container_image_refs():
     return refs
 
 
-def get_container_image_ids_for_reference(image):
-    return {
-        container_image_id
-        for config_image, container_image_id in get_container_image_refs()
-        if config_image == image and container_image_id
-    }
-
-
-def remove_unused_replaced_images(replaced_image_ids):
-    used_image_ids = get_container_image_ids()
-    removable_image_ids = sorted(set(replaced_image_ids) - used_image_ids)
-    removed_count = 0
-    errors = []
-    for image_id in removable_image_ids:
-        result = run_docker_capture(
-            ["docker", "image", "rm", image_id],
-            check=False,
-        )
-        if result.returncode == 0:
-            removed_count += 1
-        else:
-            errors.append(get_command_failure_detail(result=result))
-    return removed_count, "; ".join(errors)
-
-
 def get_remote_config_digest(image):
     result = subprocess.run(
         ["docker", "manifest", "inspect", "--verbose", image],
@@ -2235,6 +2040,20 @@ def get_remote_config_digest(image):
                 return get_manifest_config_digest(entry)
         return None
     return get_manifest_config_digest(data)
+
+
+def get_cached_remote_config_digest(image, now=None):
+    now = time.monotonic() if now is None else now
+    with remote_digest_cache_lock:
+        cached = remote_digest_cache.get(image)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+    digest = get_remote_config_digest(image)
+    ttl = REMOTE_DIGEST_CACHE_SECONDS if digest else REMOTE_DIGEST_FAILURE_CACHE_SECONDS
+    with remote_digest_cache_lock:
+        remote_digest_cache[image] = (now + ttl, digest)
+    return digest
 
 
 def get_manifest_config_digest(manifest):
@@ -2393,10 +2212,15 @@ def check_image_updates():
         and (local := local_ids.get(image))
         and local != container_image_id
     }
+    remote_ids = {}
+    if images:
+        worker_count = min(REMOTE_DIGEST_WORKERS, len(images))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            remote_ids = dict(zip(images, executor.map(get_cached_remote_config_digest, images)))
     remote_updates = {
         image for image in images
         if (local := local_ids.get(image))
-        and (remote := get_remote_config_digest(image))
+        and (remote := remote_ids.get(image))
         and local != remote
     }
     return sorted(remote_updates | stale_running_images)
@@ -2441,21 +2265,26 @@ def set_update_state(icon, engine_update, image_updates, app_update=None):
 
 
 def run_update_check(icon):
+    if not update_check_run_lock.acquire(blocking=False):
+        return
     previous_engine_update, previous_image_updates = get_update_state_snapshot()
     previous_app_update = get_app_update_snapshot()
     try:
-        app_update = check_app_update()
-    except Exception:
-        app_update = previous_app_update
-    try:
-        engine_update = check_engine_update()
-    except Exception:
-        engine_update = previous_engine_update
-    try:
-        image_updates = check_image_updates()
-    except Exception:
-        image_updates = previous_image_updates
-    GLib.idle_add(set_update_state, icon, engine_update, image_updates, app_update)
+        try:
+            app_update = check_app_update()
+        except Exception:
+            app_update = previous_app_update
+        try:
+            engine_update = check_engine_update()
+        except Exception:
+            engine_update = previous_engine_update
+        try:
+            image_updates = check_image_updates()
+        except Exception:
+            image_updates = previous_image_updates
+        GLib.idle_add(set_update_state, icon, engine_update, image_updates, app_update)
+    finally:
+        update_check_run_lock.release()
 
 
 def poll_updates(icon):
@@ -2662,6 +2491,58 @@ def schedule_image_pull_failure(icon, image, status, schedule_completion=True):
     return False, status, 0, ""
 
 
+def run_privileged_image_updates(images):
+    images = list(images)
+    result = subprocess.run(
+        ["pkexec", PRIVILEGED_HELPER, "image-update", *images],
+        capture_output=True,
+        text=True,
+        timeout=DOCKER_IMAGE_UPDATE_TIMEOUT_SECONDS * max(1, len(images)),
+    )
+    outcomes = {}
+    for line in result.stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        image = message.get("image") if isinstance(message, dict) else None
+        if image not in images or not isinstance(message.get("success"), bool):
+            continue
+        if message["success"]:
+            outcomes[image] = {
+                "success": True,
+                "error": "",
+                "service_count": int(message.get("service_count", 0)),
+                "removed_image_count": int(message.get("removed_image_count", 0)),
+                "cleanup_error": str(message.get("cleanup_error", "")),
+            }
+        else:
+            outcomes[image] = {
+                "success": False,
+                "error": str(message.get("error", "Image update failed")),
+                "service_count": 0,
+                "removed_image_count": 0,
+                "cleanup_error": "",
+            }
+
+    missing_detail = (
+        result.stderr.strip()
+        or (result.stdout.strip() if not outcomes else "")
+        or "The privileged image update helper did not return a result"
+    )
+    if len(missing_detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
+        missing_detail = missing_detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
+    for image in images:
+        outcomes.setdefault(image, {
+            "success": False,
+            "error": missing_detail,
+            "service_count": 0,
+            "removed_image_count": 0,
+            "cleanup_error": "",
+        })
+    return outcomes
+
+
 def run_image_compose_pull_safely(
     icon,
     image,
@@ -2763,25 +2644,33 @@ def start_all_image_compose_pulls(icon):
         errors = []
         cleanup_errors = []
         successful_images = []
+        try:
+            outcomes = run_privileged_image_updates(images)
+        except Exception as error:
+            detail = get_command_failure_detail(error=error)
+            outcomes = {
+                image: {
+                    "success": False,
+                    "error": detail,
+                    "removed_image_count": 0,
+                    "cleanup_error": "",
+                }
+                for image in images
+            }
         for index, image in enumerate(images, start=1):
             GLib.idle_add(
                 set_image_pull_status,
                 icon,
                 f"Updating {index} of {len(images)}: {image}...",
             )
-            success, error, removed_count, cleanup_error = run_image_compose_pull_safely(
-                icon,
-                image,
-                start_recheck=False,
-                schedule_completion=False,
-            )
-            if success:
+            outcome = outcomes[image]
+            if outcome["success"]:
                 successful_images.append(image)
-                removed_image_count += removed_count
-                if cleanup_error:
-                    cleanup_errors.append(f"{image}: {cleanup_error}")
+                removed_image_count += outcome["removed_image_count"]
+                if outcome["cleanup_error"]:
+                    cleanup_errors.append(f"{image}: {outcome['cleanup_error']}")
             else:
-                errors.append(error)
+                errors.append(f"{image}: {outcome['error']}")
 
         GLib.idle_add(
             finish_all_image_pulls,
@@ -2802,82 +2691,31 @@ def run_image_compose_pull(
     start_recheck=True,
     schedule_completion=True,
 ):
-    replaced_image_ids = get_container_image_ids_for_reference(image)
-    targets = get_compose_pull_targets_for_image(image)
-    if not targets:
+    outcome = run_privileged_image_updates([image])[image]
+    if not outcome["success"]:
         return schedule_image_pull_failure(
             icon,
             image,
-            f"No compose service was found for {image}.",
+            f"Update failed for {image}: {outcome['error']}",
             schedule_completion=schedule_completion,
         )
-
-    for config_files, service, working_dir in targets:
-        GLib.idle_add(set_image_pull_status, icon, f"Pulling {image} for {service}...")
-        try:
-            result = run_compose_pull(config_files, service, working_dir)
-        except subprocess.TimeoutExpired:
-            return schedule_image_pull_failure(
-                icon,
-                image,
-                f"Pull timed out for {image}.",
-                schedule_completion=schedule_completion,
-            )
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "docker compose pull failed"
-            return schedule_image_pull_failure(
-                icon,
-                image,
-                f"Pull failed for {image}: {detail}",
-                schedule_completion=schedule_completion,
-            )
-        GLib.idle_add(set_image_pull_status, icon, f"Restarting {service}...")
-        try:
-            result = run_compose_service_up(config_files, service, working_dir)
-        except subprocess.TimeoutExpired:
-            return schedule_image_pull_failure(
-                icon,
-                image,
-                f"Pulled {image}, but restarting compose service {service} timed out.",
-                schedule_completion=schedule_completion,
-            )
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "docker compose up failed"
-            return schedule_image_pull_failure(
-                icon,
-                image,
-                f"Pulled {image}, but restarting compose service {service} failed: {detail}",
-                schedule_completion=schedule_completion,
-            )
-        GLib.idle_add(set_image_pull_status, icon, f"Waiting for {service} to finish restarting...")
-        if not wait_for_compose_service_ready(config_files, service, working_dir):
-            return schedule_image_pull_failure(
-                icon,
-                image,
-                f"Restarted {service}, but it was not ready after {DOCKER_COMPOSE_RESTART_SETTLE_SECONDS} seconds.",
-                schedule_completion=schedule_completion,
-            )
-
-    removed_image_count = 0
-    cleanup_error = ""
-    if replaced_image_ids:
-        GLib.idle_add(set_image_pull_status, icon, f"Removing the replaced {image} image...")
-        try:
-            removed_image_count, cleanup_error = remove_unused_replaced_images(replaced_image_ids)
-        except Exception as error:
-            cleanup_error = get_command_failure_detail(error=error)
 
     if schedule_completion:
         GLib.idle_add(
             finish_image_pull,
             icon,
             image,
-            len(targets),
-            removed_image_count,
-            cleanup_error,
+            outcome["service_count"],
+            outcome["removed_image_count"],
+            outcome["cleanup_error"],
             start_recheck,
         )
-    return True, "", removed_image_count, cleanup_error
+    return (
+        True,
+        "",
+        outcome["removed_image_count"],
+        outcome["cleanup_error"],
+    )
 
 
 def show_updates_dialog(icon):

@@ -34,10 +34,10 @@ packaging.
 Download the release package and its checksum:
 
 ```bash
-curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.6/docker-tray_0.2.6_all.deb
-curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.6/docker-tray_0.2.6_all.deb.sha256
-sha256sum --check docker-tray_0.2.6_all.deb.sha256
-sudo apt install ./docker-tray_0.2.6_all.deb
+curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.7/docker-tray_0.2.7_all.deb
+curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.7/docker-tray_0.2.7_all.deb.sha256
+sha256sum --check docker-tray_0.2.7_all.deb.sha256
+sudo apt install ./docker-tray_0.2.7_all.deb
 ```
 
 Docker Tray starts automatically on login after installing the package.
@@ -61,6 +61,13 @@ authentication before state-changing Docker actions. Direct membership in the
 container snapshots to the tray without repeatedly launching Docker CLI
 processes. Compose discovery and launches are limited to files inside the
 current user's home directory. Cleanup is authorized once per cleanup run.
+Single-image and batch image updates likewise use one authenticated helper
+transaction for discovery, pull, recreation, readiness checks, and safe removal
+of replaced images.
+
+Remote registry checks run through a four-worker pool. Successful digests are
+cached for 15 minutes and transient failures for two minutes, avoiding repeated
+`docker manifest inspect` processes during closely spaced refreshes.
 
 Automatic package installation is offered only for release assets carrying a
 GitHub SHA-256 digest. The root-owned helper copies the download into a

@@ -322,6 +322,21 @@ from the popup because `docker image prune` cannot remove them yet. Do not add
 `--volumes` casually. Volumes can hold persistent app data and are intentionally
 not removed by this cleanup button.
 
+### Image Update Transactions
+
+Image updates do not send individual write commands through the generic Docker
+wrapper. One `image-update` PolicyKit action starts the root-owned broker for a
+single image or the entire `Update all` batch. The broker discovers Compose
+labels directly, accepts only Compose files and working directories inside the
+invoking user's home, pulls and recreates each service, waits for running and
+healthy containers on the new image ID, and removes replaced image IDs only
+when no container still uses them.
+
+Remote manifest checks use at most four workers. Successful registry digests
+are cached for 15 minutes and failures for two minutes. `run_update_check()` has
+a non-blocking run lock so timer and post-update refreshes cannot start
+overlapping scans.
+
 ## Troubleshooting
 
 ### Tray Icon Does Not Appear
