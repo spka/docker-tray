@@ -34,10 +34,10 @@ packaging.
 Download the release package and its checksum:
 
 ```bash
-curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.7/docker-tray_0.2.7_all.deb
-curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.7/docker-tray_0.2.7_all.deb.sha256
-sha256sum --check docker-tray_0.2.7_all.deb.sha256
-sudo apt install ./docker-tray_0.2.7_all.deb
+curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.6/docker-tray_0.2.6_all.deb
+curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.6/docker-tray_0.2.6_all.deb.sha256
+sha256sum --check docker-tray_0.2.6_all.deb.sha256
+sudo apt install ./docker-tray_0.2.6_all.deb
 ```
 
 Docker Tray starts automatically on login after installing the package.
