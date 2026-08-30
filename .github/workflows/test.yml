@@ -30,11 +30,13 @@ jobs:
         run: |
           python3 -m py_compile docker_tray.py docker_tray_platform.py docker_tray_privileged.py
           sh -n docker-tray-docker package-deb.sh scripts/release-version
-          desktop-file-validate docker-tray.desktop
       - name: Build Debian package
         run: |
           version="$(./scripts/release-version)"
           ./package-deb.sh "$version"
+          package_root="dist/docker-tray_${version}_all"
+          desktop-file-validate "$package_root/usr/share/applications/docker-tray.desktop"
+          desktop-file-validate "$package_root/etc/xdg/autostart/docker-tray.desktop"
       - name: Inspect Debian package
         run: |
           version="$(./scripts/release-version)"

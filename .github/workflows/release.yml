@@ -48,7 +48,6 @@ jobs:
           python3 -m unittest discover -s tests -v
           python3 -m py_compile docker_tray.py docker_tray_platform.py docker_tray_privileged.py
           sh -n docker-tray-docker package-deb.sh scripts/release-version
-          desktop-file-validate docker-tray.desktop
 
       - name: Build and inspect Debian package
         env:
@@ -56,9 +55,12 @@ jobs:
         run: |
           ./package-deb.sh "$VERSION"
           package="dist/docker-tray_${VERSION}_all.deb"
+          package_root="dist/docker-tray_${VERSION}_all"
           test "$(dpkg-deb --field "$package" Package)" = "docker-tray"
           test "$(dpkg-deb --field "$package" Version)" = "$VERSION"
           test "$(dpkg-deb --field "$package" Architecture)" = "all"
+          desktop-file-validate "$package_root/usr/share/applications/docker-tray.desktop"
+          desktop-file-validate "$package_root/etc/xdg/autostart/docker-tray.desktop"
           dpkg-deb --contents "$package"
           (cd dist && sha256sum "docker-tray_${VERSION}_all.deb" > "docker-tray_${VERSION}_all.deb.sha256")
 
