@@ -31,12 +31,13 @@ packaging.
 
 ## Install On Debian/Ubuntu
 
-Until version 0.2.6 is published as a release, build and install the package
-from a trusted checkout:
+Download the release package and its checksum:
 
 ```bash
-./package-deb.sh 0.2.6
-sudo apt install ./dist/docker-tray_0.2.6_all.deb
+curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.6/docker-tray_0.2.6_all.deb
+curl -fLO https://github.com/spka/docker-tray/releases/download/v0.2.6/docker-tray_0.2.6_all.deb.sha256
+sha256sum --check docker-tray_0.2.6_all.deb.sha256
+sudo apt install ./docker-tray_0.2.6_all.deb
 ```
 
 Docker Tray starts automatically on login after installing the package.
@@ -65,6 +66,10 @@ Automatic package installation is offered only for release assets carrying a
 GitHub SHA-256 digest. The root-owned helper copies the download into a
 root-owned directory, verifies its checksum and Debian metadata again, and only
 then invokes APT.
+
+Future release tags matching `vX.Y.Z` are built and published by GitHub Actions after
+the tag, application, Debian, and Arch versions are confirmed to match. Each
+release includes a SHA-256 checksum and GitHub build-provenance attestation.
 
 ## Uninstall
 

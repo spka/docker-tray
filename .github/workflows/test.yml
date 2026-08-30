@@ -2,6 +2,8 @@ name: Test and package
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -11,7 +13,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -27,11 +29,14 @@ jobs:
       - name: Validate scripts and desktop files
         run: |
           python3 -m py_compile docker_tray.py docker_tray_platform.py docker_tray_privileged.py
-          sh -n docker-tray-docker
+          sh -n docker-tray-docker package-deb.sh scripts/release-version
           desktop-file-validate docker-tray.desktop
       - name: Build Debian package
-        run: ./package-deb.sh 0.2.6
+        run: |
+          version="$(./scripts/release-version)"
+          ./package-deb.sh "$version"
       - name: Inspect Debian package
         run: |
-          dpkg-deb --info dist/docker-tray_0.2.6_all.deb
-          dpkg-deb --contents dist/docker-tray_0.2.6_all.deb
+          version="$(./scripts/release-version)"
+          dpkg-deb --info "dist/docker-tray_${version}_all.deb"
+          dpkg-deb --contents "dist/docker-tray_${version}_all.deb"

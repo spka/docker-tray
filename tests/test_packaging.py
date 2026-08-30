@@ -34,6 +34,38 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("com.github.spka.docker-tray.cleanup", policy)
         self.assertIn("com.github.spka.docker-tray.install-update", policy)
 
+    def test_release_workflow_builds_attests_and_publishes(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn('tags:', workflow)
+        self.assertIn('actions/attest@', workflow)
+        self.assertIn('sha256sum', workflow)
+        self.assertIn('gh release create', workflow)
+        self.assertIn('gh release edit', workflow)
+
+    def test_release_version_script_accepts_current_tag(self):
+        import subprocess
+
+        result = subprocess.run(
+            [ROOT / "scripts/release-version", "v0.2.6"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual("0.2.6", result.stdout.strip())
+
+    def test_release_version_script_rejects_mismatched_tag(self):
+        import subprocess
+
+        result = subprocess.run(
+            [ROOT / "scripts/release-version", "v0.2.7"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Version mismatch", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
