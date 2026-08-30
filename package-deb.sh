@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.2.3}"
+version="${1:-0.2.5}"
 package="docker-tray"
 root="dist/${package}_${version}_all"
 
@@ -9,6 +9,7 @@ rm -rf "$root"
 mkdir -p \
   "$root/DEBIAN" \
   "$root/etc/xdg/autostart" \
+  "$root/usr/share/polkit-1/actions" \
   "$root/usr/bin" \
   "$root/usr/lib/docker-tray" \
   "$root/usr/share/applications" \
@@ -23,7 +24,7 @@ Section: utils
 Priority: optional
 Architecture: all
 Maintainer: Stephan Karsten <stephan.karsten@outlook.com>
-Depends: python3, python3-pystray, python3-pil, python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1
+Depends: python3, python3-pystray, python3-pil, python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, pkexec
 Description: Small Docker tray utility
  Docker Tray shows Docker containers in the system tray and provides quick
  actions for opening exposed web ports, starting, stopping, and restarting
@@ -32,8 +33,14 @@ CONTROL
 
 install -m 0755 docker_tray.py "$root/usr/lib/docker-tray/docker_tray.py"
 install -m 0644 docker_tray_platform.py "$root/usr/lib/docker-tray/docker_tray_platform.py"
+install -m 0755 docker_tray_privileged.py "$root/usr/lib/docker-tray/docker_tray_privileged.py"
+install -m 0755 docker-tray-docker "$root/usr/lib/docker-tray/docker"
+install -m 0644 com.github.spka.docker-tray.policy \
+  "$root/usr/share/polkit-1/actions/com.github.spka.docker-tray.policy"
 cat > "$root/usr/bin/docker-tray" <<'WRAPPER'
 #!/usr/bin/env sh
+PATH=/usr/lib/docker-tray:$PATH
+export PATH
 exec python3 /usr/lib/docker-tray/docker_tray.py "$@"
 WRAPPER
 chmod 0755 "$root/usr/bin/docker-tray"

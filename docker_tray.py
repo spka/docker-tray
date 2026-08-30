@@ -24,7 +24,7 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.5"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
@@ -164,6 +164,12 @@ stats_history_cache = {
 }
 tray_menu_update_lock = threading.Lock()
 tray_menu_update_pending = False
+container_watch_lock = threading.Lock()
+container_watch_state = {
+    "ready": False,
+    "containers": (),
+    "error": None,
+}
 
 
 ICON_NAMES = ("icon-dark.png", "icon-light.png")
@@ -230,6 +236,12 @@ def watch_theme(icon):
 
 
 def get_containers():
+    with container_watch_lock:
+        if container_watch_state["ready"]:
+            if container_watch_state["error"]:
+                raise RuntimeError(container_watch_state["error"])
+            return list(container_watch_state["containers"])
+
     result = subprocess.run(
         ["docker", "ps", "-a", "--format", DOCKER_PS_FORMAT],
         capture_output=True,
@@ -245,7 +257,7 @@ def get_containers():
 def format_docker_error(message):
     lower = message.lower()
     if "permission denied" in lower and "docker.sock" in lower:
-        return "Docker socket permission denied. Add your user to the docker group and log back in."
+        return "Docker socket permission denied. Reinstall Docker Tray's PolicyKit helper."
     if "no such file or directory" in lower and "docker.sock" in lower:
         return "Docker daemon is not running. Start docker.service."
     if "cannot connect to the docker daemon" in lower:
@@ -257,11 +269,49 @@ def is_docker_installed():
     return shutil.which("docker") is not None
 
 
-def get_container_snapshot():
-    try:
-        return tuple(sorted(get_containers(), key=container_sort_key))
-    except Exception as e:
-        return ((type(e).__name__, str(e)),)
+def parse_container_watch_message(line):
+    message = json.loads(line)
+    if not isinstance(message, dict):
+        raise ValueError("invalid container status message")
+    error = message.get("error")
+    if error is not None:
+        return (), str(error)[:300]
+    raw_containers = message.get("containers")
+    if not isinstance(raw_containers, list):
+        raise ValueError("container status is missing")
+    containers = []
+    for container in raw_containers:
+        if not isinstance(container, list) or len(container) != 3:
+            raise ValueError("invalid container status entry")
+        name, running, port = container
+        if (
+            not isinstance(name, str)
+            or not isinstance(running, bool)
+            or (port is not None and not isinstance(port, str))
+        ):
+            raise ValueError("invalid container status values")
+        containers.append((name, running, port))
+    return tuple(containers), None
+
+
+def set_container_watch_state(containers=(), error=None):
+    with container_watch_lock:
+        previous = (
+            container_watch_state["ready"],
+            container_watch_state["containers"],
+            container_watch_state["error"],
+        )
+        container_watch_state.update({
+            "ready": True,
+            "containers": tuple(containers),
+            "error": error,
+        })
+        current = (
+            container_watch_state["ready"],
+            container_watch_state["containers"],
+            container_watch_state["error"],
+        )
+    return current != previous
 
 
 def parse_containers(output):
@@ -2062,21 +2112,41 @@ def open_container_stats_dialog(icon, item):
 def start_menu_polling(icon):
     icon.visible = True
     watch_theme(icon)
-    threading.Thread(target=poll_menu, args=(icon,), daemon=True).start()
+    threading.Thread(target=watch_container_status, args=(icon,), daemon=True).start()
     threading.Thread(target=poll_updates, args=(icon,), daemon=True).start()
     threading.Thread(target=poll_container_stats, args=(icon,), daemon=True).start()
 
 
-def poll_menu(icon):
-    last_snapshot = get_container_snapshot()
+def watch_container_status(icon):
+    helper = "/usr/lib/docker-tray/docker_tray_privileged.py"
     while getattr(icon, "_running", True):
+        try:
+            process = subprocess.Popen(
+                ["pkexec", helper, "watch"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            for line in process.stdout:
+                try:
+                    containers, error = parse_container_watch_message(line)
+                except (TypeError, ValueError, json.JSONDecodeError) as parse_error:
+                    containers, error = (), f"Invalid status from Docker Tray helper: {parse_error}"
+                if set_container_watch_state(containers, error):
+                    update_tray_menu(icon)
+                if not getattr(icon, "_running", True):
+                    process.terminate()
+                    return
+            detail = process.stderr.read().strip()
+            if process.wait() != 0 and not detail:
+                detail = "Docker Tray status helper stopped"
+            if detail and set_container_watch_state(error=detail[:300]):
+                update_tray_menu(icon)
+        except Exception as error:
+            if set_container_watch_state(error=f"Docker Tray status helper failed: {error}"):
+                update_tray_menu(icon)
         time.sleep(MENU_REFRESH_SECONDS)
-        current_snapshot = get_container_snapshot()
-        if current_snapshot == last_snapshot:
-            continue
-        last_snapshot = current_snapshot
-
-        update_tray_menu(icon)
 
 
 def check_engine_update():

@@ -61,8 +61,12 @@ makepkg -si
 On KDE Plasma, make sure the system tray is enabled and configured to show
 application status items.
 
-Docker must already be installed, and your user must be able to run `docker`
-without a password.
+Docker must already be installed. On Debian and Ubuntu, the packaged PolicyKit
+helper provides narrowly scoped status access and asks for desktop
+authentication before state-changing Docker actions. Direct membership in the
+`docker` group is not required. A persistent read-only helper streams sanitized
+container snapshots to the tray without repeatedly launching Docker CLI
+processes.
 
 ## Uninstall
 
