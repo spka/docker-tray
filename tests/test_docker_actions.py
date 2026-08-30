@@ -21,6 +21,9 @@ def run_idle_callback(callback, *args):
 
 
 class DockerActionTests(unittest.TestCase):
+    def tearDown(self):
+        docker_tray.desktop_notification_connection = None
+
     @mock.patch.object(docker_tray.os, "access", return_value=True)
     @mock.patch.object(docker_tray.Path, "is_file", return_value=True)
     def test_docker_detection_checks_real_binary(self, is_file, access):
@@ -46,6 +49,43 @@ class DockerActionTests(unittest.TestCase):
         self.assertEqual(
             "Authorization was cancelled. No changes were made.",
             docker_tray.get_authorization_failure_detail(result),
+        )
+
+    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=True)
+    def test_notify_user_prefers_desktop_notification_service(self, send_notification):
+        icon = mock.Mock()
+
+        docker_tray.notify_user(icon, "Container warning")
+
+        send_notification.assert_called_once_with("Container warning")
+        icon.notify.assert_not_called()
+
+    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=False)
+    def test_notify_user_falls_back_to_tray_backend(self, _send_notification):
+        icon = mock.Mock()
+
+        docker_tray.notify_user(icon, "Container warning")
+
+        icon.notify.assert_called_once_with("Container warning", "Docker Tray")
+
+    @mock.patch.object(docker_tray.Gio, "bus_get_sync")
+    def test_desktop_notification_uses_freedesktop_service(self, bus_get_sync):
+        connection = bus_get_sync.return_value
+        connection.call_sync.return_value = docker_tray.GLib.Variant("(u)", (1,))
+
+        self.assertTrue(docker_tray.send_desktop_notification("Update available"))
+
+        call = connection.call_sync.call_args
+        self.assertEqual(docker_tray.DESKTOP_NOTIFICATION_BUS_NAME, call.args[0])
+        self.assertEqual(docker_tray.DESKTOP_NOTIFICATION_OBJECT_PATH, call.args[1])
+        self.assertEqual("Notify", call.args[3])
+        parameters = call.args[4].unpack()
+        self.assertEqual("Docker Tray", parameters[0])
+        self.assertEqual("docker-tray", parameters[2])
+        self.assertEqual("Update available", parameters[4])
+        self.assertEqual(
+            docker_tray.DESKTOP_NOTIFICATION_TIMEOUT_MS,
+            call.args[7],
         )
 
     @mock.patch.object(docker_tray, "update_tray_menu")

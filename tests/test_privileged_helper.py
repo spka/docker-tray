@@ -14,6 +14,31 @@ import docker_tray_privileged as helper
 
 
 class PrivilegedHelperTests(unittest.TestCase):
+    @mock.patch.object(helper.os, "getppid", side_effect=[1234, 1234])
+    @mock.patch.object(helper.ctypes, "CDLL")
+    def test_watch_helper_requests_termination_with_parent(self, cdll, _getppid):
+        libc = cdll.return_value
+        libc.prctl.return_value = 0
+
+        helper.terminate_when_parent_exits()
+
+        cdll.assert_called_once_with(None, use_errno=True)
+        libc.prctl.assert_called_once_with(
+            helper.PR_SET_PDEATHSIG,
+            helper.signal.SIGTERM,
+            0,
+            0,
+            0,
+        )
+
+    @mock.patch.object(helper.os, "getppid", side_effect=[1234, 1])
+    @mock.patch.object(helper.ctypes, "CDLL")
+    def test_watch_helper_exits_if_parent_changed_during_setup(self, cdll, _getppid):
+        cdll.return_value.prctl.return_value = 0
+
+        with self.assertRaises(SystemExit):
+            helper.terminate_when_parent_exits()
+
     def test_parses_sanitized_container_api_snapshot(self):
         self.assertEqual(
             [

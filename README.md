@@ -73,6 +73,12 @@ last completed check, and offline, Docker Engine, or registry failures instead
 of presenting failed checks as “no updates.” Cancelled privilege prompts are
 reported separately and do not imply that an operation failed midway.
 
+Docker Tray sends health, update, and action-failure notices directly to the
+desktop's standard notification service, so they appear as Ubuntu notification
+popups and remain available in the notification list. Use **Settings → Test
+notification** to verify delivery. The tray backend remains as a fallback when
+the desktop notification service is unavailable.
+
 Automatic package installation is offered only for release assets carrying a
 GitHub SHA-256 digest. The root-owned helper copies the download into a
 root-owned directory, verifies its checksum and Debian metadata again, and only

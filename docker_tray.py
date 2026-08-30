@@ -54,6 +54,9 @@ REMOTE_DIGEST_CACHE_SECONDS = 15 * 60
 REMOTE_DIGEST_FAILURE_CACHE_SECONDS = 2 * 60
 REMOTE_DIGEST_WORKERS = 4
 COMMAND_ERROR_DETAIL_MAX_CHARS = 500
+DESKTOP_NOTIFICATION_TIMEOUT_MS = 3000
+DESKTOP_NOTIFICATION_BUS_NAME = "org.freedesktop.Notifications"
+DESKTOP_NOTIFICATION_OBJECT_PATH = "/org/freedesktop/Notifications"
 AUTOSTART_DESKTOP_FILE = Path.home() / ".config" / "autostart" / "docker-tray.desktop"
 SYSTEM_AUTOSTART_DESKTOP_FILE = Path("/etc/xdg/autostart/docker-tray.desktop")
 AUTOSTART_ENABLED_PREFIX = "X-GNOME-Autostart-enabled="
@@ -168,6 +171,8 @@ container_watch_state = {
     "containers": (),
     "error": None,
 }
+desktop_notification_lock = threading.Lock()
+desktop_notification_connection = None
 
 
 ICON_NAMES = ("icon-dark.png", "icon-light.png")
@@ -390,11 +395,59 @@ def notify_command_failure(icon, operation, result=None, error=None):
     notify_user(icon, f"{operation}: {detail}")
 
 
+def send_desktop_notification(message, title="Docker Tray"):
+    global desktop_notification_connection
+    try:
+        with desktop_notification_lock:
+            if desktop_notification_connection is None:
+                desktop_notification_connection = Gio.bus_get_sync(
+                    Gio.BusType.SESSION,
+                    None,
+                )
+            parameters = GLib.Variant(
+                "(susssasa{sv}i)",
+                (
+                    "Docker Tray",
+                    0,
+                    "docker-tray",
+                    title,
+                    message,
+                    [],
+                    {
+                        "desktop-entry": GLib.Variant("s", "docker-tray"),
+                    },
+                    -1,
+                ),
+            )
+            desktop_notification_connection.call_sync(
+                DESKTOP_NOTIFICATION_BUS_NAME,
+                DESKTOP_NOTIFICATION_OBJECT_PATH,
+                DESKTOP_NOTIFICATION_BUS_NAME,
+                "Notify",
+                parameters,
+                GLib.VariantType("(u)"),
+                Gio.DBusCallFlags.NONE,
+                DESKTOP_NOTIFICATION_TIMEOUT_MS,
+                None,
+            )
+        return True
+    except Exception:
+        with desktop_notification_lock:
+            desktop_notification_connection = None
+        return False
+
+
 def notify_user(icon, message):
+    if send_desktop_notification(message):
+        return
     try:
         icon.notify(message, "Docker Tray")
     except Exception:
         pass
+
+
+def send_test_notification(icon, item):
+    notify_user(icon, "Ubuntu desktop notifications are connected.")
 
 
 def run_docker_action(action, name, icon=None):
@@ -2969,6 +3022,7 @@ def open_updates_dialog(icon, item):
 def get_settings_items(pystray):
     return [
         pystray.MenuItem(get_update_check_label, open_updates_dialog),
+        pystray.MenuItem("Test notification", send_test_notification),
         pystray.MenuItem("Container stats", open_container_stats_dialog),
         pystray.MenuItem("Compose search", make_compose_search_cb()),
         pystray.MenuItem("Cleanup", make_cleanup_cb()),

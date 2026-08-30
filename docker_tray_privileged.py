@@ -6,12 +6,14 @@ by Docker Tray, separating unattended read-only queries from authenticated
 state-changing operations.
 """
 
+import ctypes
 import http.client
 import hashlib
 import json
 import os
 import pwd
 import re
+import signal
 import socket
 import stat
 import subprocess
@@ -29,6 +31,7 @@ MAX_UPDATE_PACKAGE_BYTES = 100 * 1024 * 1024
 UPDATE_VERSION_RE = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
 UPDATE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 WATCH_INTERVAL_SECONDS = 5
+PR_SET_PDEATHSIG = 1
 COMPOSE_PULL_TIMEOUT_SECONDS = 10 * 60
 COMPOSE_UP_TIMEOUT_SECONDS = 3 * 60
 COMPOSE_READY_TIMEOUT_SECONDS = 60
@@ -559,6 +562,16 @@ def write_watch_message(message):
         raise SystemExit(0)
 
 
+def terminate_when_parent_exits():
+    parent_pid = os.getppid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+    if os.getppid() != parent_pid:
+        raise SystemExit(0)
+
+
 def watch_container_snapshots():
     while True:
         try:
@@ -585,6 +598,7 @@ def main(argv=None):
     if mode == "watch":
         if len(argv) != 2:
             fail("invalid watch request")
+        terminate_when_parent_exits()
         watch_container_snapshots()
         return
     if mode == "cleanup":
