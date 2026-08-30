@@ -51,22 +51,34 @@ class DockerActionTests(unittest.TestCase):
             docker_tray.get_authorization_failure_detail(result),
         )
 
-    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=True)
-    def test_notify_user_prefers_desktop_notification_service(self, send_notification):
+    def test_denied_authorization_is_not_reported_as_cancelled(self):
+        result = subprocess.CompletedProcess([], 127, "", "Not authorized")
+
+        self.assertEqual(
+            "Authorization was denied. No changes were made.",
+            docker_tray.get_authorization_failure_detail(result),
+        )
+
+    def test_authorization_broker_failure_is_not_reported_as_cancelled(self):
+        result = subprocess.CompletedProcess([], 127, "", "")
+
+        self.assertEqual(
+            "Authorization failed. No changes were made.",
+            docker_tray.get_authorization_failure_detail(result),
+        )
+
+    @mock.patch.object(docker_tray.threading, "Thread")
+    def test_notify_user_schedules_desktop_notification_off_ui_thread(self, thread):
         icon = mock.Mock()
 
         docker_tray.notify_user(icon, "Container warning")
 
-        send_notification.assert_called_once_with("Container warning")
-        icon.notify.assert_not_called()
-
-    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=False)
-    def test_notify_user_falls_back_to_tray_backend(self, _send_notification):
-        icon = mock.Mock()
-
-        docker_tray.notify_user(icon, "Container warning")
-
-        icon.notify.assert_called_once_with("Container warning", "Docker Tray")
+        thread.assert_called_once_with(
+            target=docker_tray.send_desktop_notification,
+            args=("Container warning",),
+            daemon=True,
+        )
+        thread.return_value.start.assert_called_once_with()
 
     @mock.patch.object(docker_tray.Gio, "bus_get_sync")
     def test_desktop_notification_uses_freedesktop_service(self, bus_get_sync):
@@ -88,10 +100,11 @@ class DockerActionTests(unittest.TestCase):
             call.args[7],
         )
 
+    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=True)
     @mock.patch.object(docker_tray, "update_tray_menu")
     @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
     @mock.patch.object(docker_tray.subprocess, "run")
-    def test_failed_container_action_notifies_user(self, run, update_menu):
+    def test_failed_container_action_notifies_user(self, run, update_menu, send_notification):
         run.return_value = subprocess.CompletedProcess(
             args=["docker", "stop", "web"],
             returncode=1,
@@ -102,12 +115,10 @@ class DockerActionTests(unittest.TestCase):
 
         docker_tray.run_docker_action("stop", "web", icon)
 
-        icon.notify.assert_called_once_with(
-            "Could not stop web: permission denied",
-            "Docker Tray",
-        )
+        send_notification.assert_called_once_with("Could not stop web: permission denied")
         update_menu.assert_called_once_with(icon)
 
+    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=True)
     @mock.patch.object(docker_tray, "update_tray_menu")
     @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
     @mock.patch.object(
@@ -115,17 +126,19 @@ class DockerActionTests(unittest.TestCase):
         "run",
         side_effect=subprocess.TimeoutExpired(["docker", "restart", "web"], 15),
     )
-    def test_timed_out_container_action_notifies_user(self, _run, update_menu):
+    def test_timed_out_container_action_notifies_user(
+        self, _run, update_menu, send_notification,
+    ):
         icon = mock.Mock()
 
         docker_tray.run_docker_action("restart", "web", icon)
 
-        icon.notify.assert_called_once_with(
+        send_notification.assert_called_once_with(
             "Could not restart web: timed out after 15 seconds",
-            "Docker Tray",
         )
         update_menu.assert_called_once_with(icon)
 
+    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=True)
     @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)
     @mock.patch.object(docker_tray, "update_tray_menu")
     @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
@@ -135,6 +148,7 @@ class DockerActionTests(unittest.TestCase):
         run,
         update_menu,
         _idle_add,
+        send_notification,
     ):
         run.return_value = subprocess.CompletedProcess(
             args=["docker", "compose"],
@@ -147,13 +161,13 @@ class DockerActionTests(unittest.TestCase):
 
         docker_tray.run_compose_up("compose.yml", icon, on_finished)
 
-        icon.notify.assert_called_once_with(
+        send_notification.assert_called_once_with(
             "Could not start compose.yml: invalid compose file",
-            "Docker Tray",
         )
         on_finished.assert_called_once_with(False)
         update_menu.assert_called_once_with(icon)
 
+    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=True)
     @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)
     @mock.patch.object(docker_tray, "update_tray_menu")
     @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
@@ -163,6 +177,7 @@ class DockerActionTests(unittest.TestCase):
         run,
         update_menu,
         _idle_add,
+        send_notification,
     ):
         run.return_value = subprocess.CompletedProcess(
             args=["docker", "compose"],
@@ -178,7 +193,7 @@ class DockerActionTests(unittest.TestCase):
             compose_file.touch()
             docker_tray.run_compose_up(compose_file, icon, on_finished)
 
-        icon.notify.assert_not_called()
+        send_notification.assert_not_called()
         on_finished.assert_called_once_with(True)
         update_menu.assert_called_once_with(icon)
         self.assertEqual(compose_file.parent, run.call_args.kwargs["cwd"])
@@ -189,10 +204,14 @@ class DockerActionTests(unittest.TestCase):
         for _label, location in docker_tray.get_compose_scan_locations():
             location.resolve().relative_to(home)
 
+    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=True)
+    @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
     @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)
     @mock.patch.object(docker_tray.time, "sleep")
     @mock.patch.object(docker_tray, "get_compose_file_running_state", return_value=False)
-    def test_compose_start_state_timeout_notifies_user(self, _state, _sleep, _idle_add):
+    def test_compose_start_state_timeout_notifies_user(
+        self, _state, _sleep, _idle_add, send_notification,
+    ):
         icon = mock.Mock()
         row = mock.Mock()
         button = mock.Mock()
@@ -200,9 +219,8 @@ class DockerActionTests(unittest.TestCase):
 
         docker_tray.poll_compose_start_state("compose.yml", icon, row, button)
 
-        icon.notify.assert_called_once_with(
+        send_notification.assert_called_once_with(
             "Could not start compose.yml: no running container appeared within 60 seconds",
-            "Docker Tray",
         )
         button.set_label.assert_called_once_with("Run")
         button.set_sensitive.assert_called_once_with(True)

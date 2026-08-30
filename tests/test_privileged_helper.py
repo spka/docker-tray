@@ -78,7 +78,8 @@ class PrivilegedHelperTests(unittest.TestCase):
             "inspect", "--format", "{{.Image}}", "a" * 64,
         ])
         helper.validate_read([
-            "image", "inspect", "--format", "{{.Id}}", "example/app:latest",
+            "image", "inspect", "--format", "{{.Id}}",
+            "example/app:latest", "example/worker:latest",
         ])
 
     def test_rejects_arbitrary_read_command(self):

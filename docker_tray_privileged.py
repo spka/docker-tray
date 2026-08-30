@@ -138,8 +138,8 @@ def validate_read(args):
     if len(args) >= 4 and args[:2] == ["inspect", "--format"]:
         if args[2] in INSPECT_FORMATS and all(valid_id(value) for value in args[3:]):
             return
-    if len(args) == 5 and args[:3] == ["image", "inspect", "--format"]:
-        if args[3] == "{{.Id}}" and valid_image(args[4]):
+    if len(args) >= 5 and args[:3] == ["image", "inspect", "--format"]:
+        if args[3] == "{{.Id}}" and all(valid_image(image) for image in args[4:]):
             return
     fail("read command is not permitted")
 

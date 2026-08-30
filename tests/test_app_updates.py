@@ -8,6 +8,15 @@ from unittest import mock
 import docker_tray
 
 
+class ImmediateThread:
+    def __init__(self, target, args=(), **_kwargs):
+        self.target = target
+        self.args = args
+
+    def start(self):
+        self.target(*self.args)
+
+
 def run_idle_callback(callback, *args):
     return callback(*args)
 
@@ -201,8 +210,12 @@ class AppUpdateTests(unittest.TestCase):
         self.assertTrue(icon._restart_after_upgrade)
         icon.stop.assert_called_once_with()
 
+    @mock.patch.object(docker_tray, "send_desktop_notification", return_value=True)
+    @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
     @mock.patch.object(docker_tray, "update_tray_menu")
-    def test_new_app_release_sends_only_one_desktop_notice(self, _update_menu):
+    def test_new_app_release_sends_only_one_desktop_notice(
+        self, _update_menu, send_notification,
+    ):
         icon = mock.Mock()
         update = docker_tray.AppUpdate(
             True,
@@ -223,10 +236,7 @@ class AppUpdateTests(unittest.TestCase):
             update,
         )
 
-        icon.notify.assert_called_once_with(
-            "Docker Tray 0.3.0 is available.",
-            "Docker Tray",
-        )
+        send_notification.assert_called_once_with("Docker Tray 0.3.0 is available.")
 
     @mock.patch.object(docker_tray, "update_tray_menu")
     @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)

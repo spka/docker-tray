@@ -277,9 +277,10 @@ def format_docker_error(message):
     if any(marker in lower for marker in (
         "request dismissed",
         "authentication dialog was dismissed",
-        "not authorized",
     )):
         return "Authorization was cancelled. Docker Tray will retry automatically."
+    if "not authorized" in lower:
+        return "Authorization was denied. Docker Tray will retry automatically."
     return message
 
 
@@ -382,9 +383,12 @@ def get_authorization_failure_detail(result, fallback="privileged operation fail
     if result.returncode == 126 or any(marker in lower for marker in (
         "request dismissed",
         "authentication dialog was dismissed",
-        "not authorized",
     )):
         return "Authorization was cancelled. No changes were made."
+    if "not authorized" in lower:
+        return "Authorization was denied. No changes were made."
+    if result.returncode == 127:
+        return "Authorization failed. No changes were made."
     return get_command_failure_detail(result=result)
 
 
@@ -438,12 +442,11 @@ def send_desktop_notification(message, title="Docker Tray"):
 
 
 def notify_user(icon, message):
-    if send_desktop_notification(message):
-        return
-    try:
-        icon.notify(message, "Docker Tray")
-    except Exception:
-        pass
+    threading.Thread(
+        target=send_desktop_notification,
+        args=(message,),
+        daemon=True,
+    ).start()
 
 
 def send_test_notification(icon, item):
@@ -2065,13 +2068,22 @@ def check_engine_update():
     return docker_tray_platform.check_engine_update(DOCKER_CMD_TIMEOUT_SECONDS, PLATFORM_INFO)
 
 
-def get_local_image_id(image):
+def get_local_image_ids(images):
+    images = list(images)
+    if not images:
+        return {}
     result = subprocess.run(
-        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        ["docker", "image", "inspect", "--format", "{{.Id}}", *images],
         capture_output=True, text=True,
         timeout=DOCKER_CMD_TIMEOUT_SECONDS,
     )
-    return result.stdout.strip() if result.returncode == 0 else None
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "image inspection failed"
+        raise RuntimeError(detail)
+    image_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(image_ids) != len(images):
+        raise RuntimeError("Docker returned an incomplete image inspection result")
+    return dict(zip(images, image_ids))
 
 
 def get_container_image_refs():
@@ -2285,7 +2297,7 @@ def check_image_updates():
         image for image, _container_image_id in container_refs
         if is_checkable_image(image)
     })
-    local_ids = {image: get_local_image_id(image) for image in images}
+    local_ids = get_local_image_ids(images)
     stale_running_images = {
         image for image, container_image_id in container_refs
         if is_checkable_image(image)

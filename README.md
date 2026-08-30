@@ -68,16 +68,18 @@ transaction for discovery, pull, recreation, readiness checks, and safe removal
 of replaced images.
 
 Remote registry checks run through a four-worker pool, and successful digests
-are cached for 15 minutes. The updates view reports checks in progress, the
-last completed check, and offline, Docker Engine, or registry failures instead
-of presenting failed checks as “no updates.” Cancelled privilege prompts are
-reported separately and do not imply that an operation failed midway.
+are cached for 15 minutes. Local image IDs are inspected in one batched
+PolicyKit transaction instead of launching one helper per image. The updates
+view reports checks in progress, the last completed check, and offline, Docker
+Engine, or registry failures instead of presenting failed checks as “no
+updates.” Cancelled, denied, and failed privilege requests are reported
+separately and do not imply that an operation failed midway.
 
 Docker Tray sends health, update, and action-failure notices directly to the
 desktop's standard notification service, so they appear as Ubuntu notification
 popups and remain available in the notification list. Use **Settings → Test
-notification** to verify delivery. The tray backend remains as a fallback when
-the desktop notification service is unavailable.
+notification** to verify delivery. Delivery runs outside the GTK event loop
+and times out cleanly if the desktop notification service is unavailable.
 
 Automatic package installation is offered only for release assets carrying a
 GitHub SHA-256 digest. The root-owned helper copies the download into a

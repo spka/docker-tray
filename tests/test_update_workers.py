@@ -156,12 +156,12 @@ class UpdateWorkerTests(unittest.TestCase):
         self.assertEqual(2, get_remote_digest.call_count)
 
     @mock.patch.object(docker_tray, "ThreadPoolExecutor")
-    @mock.patch.object(docker_tray, "get_local_image_id")
+    @mock.patch.object(docker_tray, "get_local_image_ids")
     @mock.patch.object(docker_tray, "get_container_image_refs")
     def test_registry_checks_use_bounded_worker_pool(
         self,
         get_container_refs,
-        get_local_image_id,
+        get_local_image_ids,
         executor,
     ):
         images = [f"example-{index}:latest" for index in range(6)]
@@ -169,7 +169,7 @@ class UpdateWorkerTests(unittest.TestCase):
         get_container_refs.return_value = [
             (image, image_ids[image]) for image in images
         ]
-        get_local_image_id.side_effect = image_ids.get
+        get_local_image_ids.return_value = image_ids
         executor.return_value.__enter__.return_value.map.return_value = [
             image_ids[image] for image in images
         ]
@@ -179,14 +179,15 @@ class UpdateWorkerTests(unittest.TestCase):
         executor.assert_called_once_with(max_workers=docker_tray.REMOTE_DIGEST_WORKERS)
         map_call = executor.return_value.__enter__.return_value.map.call_args
         self.assertEqual(images, list(map_call.args[1]))
+        get_local_image_ids.assert_called_once_with(images)
 
     @mock.patch.object(docker_tray, "get_remote_config_digest")
-    @mock.patch.object(docker_tray, "get_local_image_id")
+    @mock.patch.object(docker_tray, "get_local_image_ids")
     @mock.patch.object(docker_tray, "get_container_image_refs")
     def test_image_update_check_includes_moving_major_tags(
         self,
         get_container_refs,
-        get_local_image_id,
+        get_local_image_ids,
         get_remote_config_digest,
     ):
         digest_pin = "pinned@sha256:" + "4" * 64
@@ -196,11 +197,12 @@ class UpdateWorkerTests(unittest.TestCase):
             ("fixed:15.2.2", "sha256:fixed"),
             (digest_pin, "sha256:pinned"),
         ]
-        get_local_image_id.side_effect = {
+        local_ids = {
             "wg-easy:15": "sha256:old-wg",
             "immich:v3": "sha256:old-immich",
             "fixed:15.2.2": "sha256:fixed",
-        }.get
+        }
+        get_local_image_ids.return_value = local_ids
         get_remote_config_digest.side_effect = {
             "wg-easy:15": "sha256:new-wg",
             "immich:v3": "sha256:new-immich",
@@ -210,9 +212,40 @@ class UpdateWorkerTests(unittest.TestCase):
         updates = docker_tray.check_image_updates()
 
         self.assertEqual(["immich:v3", "wg-easy:15"], updates)
-        self.assertNotIn(mock.call(digest_pin), get_local_image_id.call_args_list)
+        get_local_image_ids.assert_called_once_with(sorted(local_ids))
         self.assertNotIn(mock.call(digest_pin), get_remote_config_digest.call_args_list)
-        self.assertEqual(3, get_local_image_id.call_count)
+
+    @mock.patch.object(docker_tray.subprocess, "run")
+    def test_local_image_ids_use_one_batched_command(self, run):
+        run.return_value = subprocess.CompletedProcess(
+            [],
+            0,
+            "sha256:one\nsha256:two\n",
+            "",
+        )
+
+        result = docker_tray.get_local_image_ids(["one:latest", "two:latest"])
+
+        self.assertEqual({
+            "one:latest": "sha256:one",
+            "two:latest": "sha256:two",
+        }, result)
+        run.assert_called_once_with(
+            [
+                "docker", "image", "inspect", "--format", "{{.Id}}",
+                "one:latest", "two:latest",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=docker_tray.DOCKER_CMD_TIMEOUT_SECONDS,
+        )
+
+    @mock.patch.object(docker_tray.subprocess, "run")
+    def test_batched_image_inspection_failure_is_visible(self, run):
+        run.return_value = subprocess.CompletedProcess([], 1, "", "missing image")
+
+        with self.assertRaisesRegex(RuntimeError, "missing image"):
+            docker_tray.get_local_image_ids(["missing:latest"])
 
     @mock.patch.object(docker_tray, "finish_image_pull")
     @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)

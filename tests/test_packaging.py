@@ -41,7 +41,10 @@ class PackagingTests(unittest.TestCase):
         arch = (ROOT / "packaging/arch/PKGBUILD").read_text()
         for package in (deb, arch):
             self.assertIn("usr/lib/systemd/user/docker-tray.service", package)
-            self.assertIn("Exec=systemctl --user start docker-tray.service", package)
+            self.assertEqual(
+                2,
+                package.count("Exec=systemctl --user start docker-tray.service"),
+            )
 
     def test_wrapper_uses_home_for_non_compose_commands(self):
         wrapper = (ROOT / "docker-tray-docker").read_text()
