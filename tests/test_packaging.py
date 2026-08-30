@@ -9,9 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PackagingTests(unittest.TestCase):
     def test_versions_match(self):
-        self.assertEqual("0.2.7", docker_tray.APP_VERSION)
+        self.assertEqual("0.2.8", docker_tray.APP_VERSION)
         self.assertIn("pkgver=0.2.7", (ROOT / "packaging/arch/PKGBUILD").read_text())
-        self.assertIn('version="${1:-0.2.7}"', (ROOT / "package-deb.sh").read_text())
+        self.assertIn('version="${1:-0.2.8}"', (ROOT / "package-deb.sh").read_text())
 
     def test_arch_package_contains_security_integration(self):
         package = (ROOT / "packaging/arch/PKGBUILD").read_text()
@@ -21,8 +21,27 @@ class PackagingTests(unittest.TestCase):
             "docker-tray-docker",
             "com.github.spka.docker-tray.policy",
             "PATH=/usr/lib/docker-tray:$PATH",
+            "archive/refs/tags/v${pkgver}.tar.gz",
+            "sha256sums=(",
+            "docker-tray.service",
         ):
             self.assertIn(expected, package)
+
+    def test_arch_metadata_tracks_published_release(self):
+        srcinfo = (ROOT / "packaging/arch/.SRCINFO").read_text()
+        self.assertIn("pkgver = 0.2.7", srcinfo)
+        self.assertIn("docker-tray-0.2.7.tar.gz", srcinfo)
+        self.assertNotIn("SKIP", srcinfo)
+
+    def test_packages_install_supervised_user_service(self):
+        service = (ROOT / "docker-tray.service").read_text()
+        self.assertIn("Restart=on-failure", service)
+        self.assertIn("PartOf=graphical-session.target", service)
+        deb = (ROOT / "package-deb.sh").read_text()
+        arch = (ROOT / "packaging/arch/PKGBUILD").read_text()
+        for package in (deb, arch):
+            self.assertIn("usr/lib/systemd/user/docker-tray.service", package)
+            self.assertIn("Exec=systemctl --user start docker-tray.service", package)
 
     def test_wrapper_uses_home_for_non_compose_commands(self):
         wrapper = (ROOT / "docker-tray-docker").read_text()
@@ -47,19 +66,19 @@ class PackagingTests(unittest.TestCase):
         import subprocess
 
         result = subprocess.run(
-            [ROOT / "scripts/release-version", "v0.2.7"],
+            [ROOT / "scripts/release-version", "v0.2.8"],
             cwd=ROOT,
             capture_output=True,
             text=True,
             check=True,
         )
-        self.assertEqual("0.2.7", result.stdout.strip())
+        self.assertEqual("0.2.8", result.stdout.strip())
 
     def test_release_version_script_rejects_mismatched_tag(self):
         import subprocess
 
         result = subprocess.run(
-            [ROOT / "scripts/release-version", "v0.2.8"],
+            [ROOT / "scripts/release-version", "v0.2.9"],
             cwd=ROOT,
             capture_output=True,
             text=True,

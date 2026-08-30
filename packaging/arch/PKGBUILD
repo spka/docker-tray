@@ -1,6 +1,7 @@
+# Maintainer: Stephan Karsten <stephan.karsten@outlook.com>
 pkgname=docker-tray
 pkgver=0.2.7
-pkgrel=1
+pkgrel=2
 pkgdesc="Small Docker tray utility"
 arch=("any")
 url="https://github.com/spka/docker-tray"
@@ -15,24 +16,35 @@ depends=(
   "python-pystray"
   "polkit"
 )
-source=()
-sha256sums=()
+source=(
+  "${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz"
+  "docker-tray.service"
+  "systemd-autostart.patch"
+)
+sha256sums=(
+  "d0a02834b9b14ba5ea1e0ec4d44238cb9dc265d9a788e0d444743592403b70d7"
+  "c115183a465aa4c0a5ad7a6da7a7a66642d8f4a2d266cd698c39216fd865900c"
+  "d9acd65ef8174f3b44b247ff48f402ddfeb68603e1e1c54d8cd703fea937f2d9"
+)
+
+prepare() {
+  patch -d "${srcdir}/${pkgname}-${pkgver}" -Np1 -i "${srcdir}/systemd-autostart.patch"
+}
 
 package() {
-  local repo_root="${startdir}/../.."
+  local source_root="${srcdir}/${pkgname}-${pkgver}"
 
-  install -Dm755 "${repo_root}/docker_tray.py" "${pkgdir}/usr/lib/docker-tray/docker_tray.py"
-  install -Dm644 "${repo_root}/docker_tray_platform.py" "${pkgdir}/usr/lib/docker-tray/docker_tray_platform.py"
-  install -Dm755 "${repo_root}/docker_tray_privileged.py" "${pkgdir}/usr/lib/docker-tray/docker_tray_privileged.py"
-  install -Dm755 "${repo_root}/docker-tray-docker" "${pkgdir}/usr/lib/docker-tray/docker"
-  install -Dm644 "${repo_root}/com.github.spka.docker-tray.policy" "${pkgdir}/usr/share/polkit-1/actions/com.github.spka.docker-tray.policy"
-
-  install -Dm644 "${repo_root}/icon-dark.png" "${pkgdir}/usr/share/docker-tray/icon-dark.png"
-  install -Dm644 "${repo_root}/icon-light.png" "${pkgdir}/usr/share/docker-tray/icon-light.png"
-  install -Dm644 "${repo_root}/icon-light.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/docker-tray.png"
-
-  install -Dm644 "${repo_root}/README.md" "${pkgdir}/usr/share/doc/docker-tray/README.md"
-  install -Dm644 "${repo_root}/LICENSE" "${pkgdir}/usr/share/licenses/docker-tray/LICENSE"
+  install -Dm755 "${source_root}/docker_tray.py" "${pkgdir}/usr/lib/docker-tray/docker_tray.py"
+  install -Dm644 "${source_root}/docker_tray_platform.py" "${pkgdir}/usr/lib/docker-tray/docker_tray_platform.py"
+  install -Dm755 "${source_root}/docker_tray_privileged.py" "${pkgdir}/usr/lib/docker-tray/docker_tray_privileged.py"
+  install -Dm755 "${source_root}/docker-tray-docker" "${pkgdir}/usr/lib/docker-tray/docker"
+  install -Dm644 "${source_root}/com.github.spka.docker-tray.policy" "${pkgdir}/usr/share/polkit-1/actions/com.github.spka.docker-tray.policy"
+  install -Dm644 "${srcdir}/docker-tray.service" "${pkgdir}/usr/lib/systemd/user/docker-tray.service"
+  install -Dm644 "${source_root}/icon-dark.png" "${pkgdir}/usr/share/docker-tray/icon-dark.png"
+  install -Dm644 "${source_root}/icon-light.png" "${pkgdir}/usr/share/docker-tray/icon-light.png"
+  install -Dm644 "${source_root}/icon-light.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/docker-tray.png"
+  install -Dm644 "${source_root}/README.md" "${pkgdir}/usr/share/doc/docker-tray/README.md"
+  install -Dm644 "${source_root}/LICENSE" "${pkgdir}/usr/share/licenses/docker-tray/LICENSE"
 
   install -Dm755 /dev/stdin "${pkgdir}/usr/bin/docker-tray" <<'WRAPPER'
 #!/usr/bin/env sh
@@ -56,11 +68,12 @@ DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Docker Tray
-Exec=docker-tray
+Exec=systemctl --user start docker-tray.service
 Icon=/usr/share/docker-tray/icon-light.png
 Comment=Docker container monitor in the system tray
 Categories=Utility;
 Terminal=false
 Hidden=false
+X-GNOME-Autostart-enabled=true
 DESKTOP
 }

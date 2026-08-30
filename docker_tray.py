@@ -25,7 +25,7 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.2.7"
+APP_VERSION = "0.2.8"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
@@ -131,6 +131,9 @@ update_check_state = {
     "app_update": AppUpdate(False),
     "engine_update": docker_tray_platform.EngineUpdate(False),
     "image_updates": [],
+    "checking": False,
+    "last_checked": None,
+    "errors": (),
 }
 update_check_lock = threading.Lock()
 update_check_run_lock = threading.Lock()
@@ -266,6 +269,12 @@ def format_docker_error(message):
         return "Docker daemon is not running. Start docker.service."
     if "cannot connect to the docker daemon" in lower:
         return "Docker daemon is not running."
+    if any(marker in lower for marker in (
+        "request dismissed",
+        "authentication dialog was dismissed",
+        "not authorized",
+    )):
+        return "Authorization was cancelled. Docker Tray will retry automatically."
     return message
 
 
@@ -360,6 +369,18 @@ def get_command_failure_detail(result=None, error=None):
     if len(detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
         return detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
     return detail
+
+
+def get_authorization_failure_detail(result, fallback="privileged operation failed"):
+    detail = result.stderr.strip() or result.stdout.strip() or fallback
+    lower = detail.lower()
+    if result.returncode == 126 or any(marker in lower for marker in (
+        "request dismissed",
+        "authentication dialog was dismissed",
+        "not authorized",
+    )):
+        return "Authorization was cancelled. No changes were made."
+    return get_command_failure_detail(result=result)
 
 
 def notify_command_failure(icon, operation, result=None, error=None):
@@ -661,7 +682,7 @@ def run_docker_cleanup():
         timeout=4 * DOCKER_CMD_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "Docker cleanup failed"
+        detail = get_authorization_failure_detail(result, "Docker cleanup failed")
         raise RuntimeError(detail)
     return result.stdout.strip() or "Docker cleanup completed"
 
@@ -1240,7 +1261,7 @@ def get_autostart_exec():
         Path("/usr/bin/docker-tray"),
         Path("/usr/lib/docker-tray/docker_tray.py"),
     ):
-        return "docker-tray"
+        return "systemctl --user start docker-tray.service"
     return f'python3 "{script_path}"'
 
 
@@ -1270,6 +1291,7 @@ def write_autostart_enabled(enabled):
     else:
         gnome_updated = False
         hidden_updated = False
+        exec_updated = False
         for index, line in enumerate(lines):
             if line.startswith(AUTOSTART_ENABLED_PREFIX):
                 lines[index] = f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}"
@@ -1277,10 +1299,15 @@ def write_autostart_enabled(enabled):
             elif line.startswith(AUTOSTART_HIDDEN_PREFIX):
                 lines[index] = f"{AUTOSTART_HIDDEN_PREFIX}{str(not enabled).lower()}"
                 hidden_updated = True
+            elif line.startswith("Exec="):
+                lines[index] = f"Exec={get_autostart_exec()}"
+                exec_updated = True
         if not hidden_updated:
             lines.append(f"{AUTOSTART_HIDDEN_PREFIX}{str(not enabled).lower()}")
         if not gnome_updated:
             lines.append(f"{AUTOSTART_ENABLED_PREFIX}{str(enabled).lower()}")
+        if not exec_updated:
+            lines.append(f"Exec={get_autostart_exec()}")
 
     AUTOSTART_DESKTOP_FILE.write_text("\n".join(lines).rstrip() + "\n")
 
@@ -2027,11 +2054,12 @@ def get_remote_config_digest(image):
         timeout=DOCKER_MANIFEST_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        return None
+        detail = result.stderr.strip() or result.stdout.strip() or "registry request failed"
+        raise RuntimeError(f"{image}: {detail}")
     try:
         data = json.loads(result.stdout)
-    except Exception:
-        return None
+    except Exception as error:
+        raise RuntimeError(f"{image}: invalid registry response") from error
     arch = docker_tray_platform.linux_package_arch()
     if isinstance(data, list):
         for entry in data:
@@ -2239,6 +2267,33 @@ def get_app_update_snapshot():
         return update_check_state["app_update"]
 
 
+def get_update_feedback_snapshot():
+    with update_check_lock:
+        return {
+            "checking": update_check_state["checking"],
+            "last_checked": update_check_state["last_checked"],
+            "errors": tuple(update_check_state["errors"]),
+        }
+
+
+def set_update_feedback(icon, checking, last_checked=None, errors=None):
+    with update_check_lock:
+        changed = update_check_state["checking"] != checking
+        update_check_state["checking"] = checking
+        if last_checked is not None:
+            changed = changed or update_check_state["last_checked"] != last_checked
+            update_check_state["last_checked"] = last_checked
+        if errors is not None:
+            errors = tuple(errors)
+            changed = changed or update_check_state["errors"] != errors
+            update_check_state["errors"] = errors
+    if changed:
+        update_tray_menu(icon)
+        if updates_dialog["window"] is not None:
+            show_updates_dialog(icon)
+    return GLib.SOURCE_REMOVE
+
+
 def set_update_state(icon, engine_update, image_updates, app_update=None):
     with update_check_lock:
         if app_update is None:
@@ -2267,24 +2322,58 @@ def set_update_state(icon, engine_update, image_updates, app_update=None):
 def run_update_check(icon):
     if not update_check_run_lock.acquire(blocking=False):
         return
+    GLib.idle_add(set_update_feedback, icon, True)
     previous_engine_update, previous_image_updates = get_update_state_snapshot()
     previous_app_update = get_app_update_snapshot()
+    errors = []
     try:
         try:
             app_update = check_app_update()
-        except Exception:
+        except Exception as error:
             app_update = previous_app_update
+            errors.append(f"Docker Tray release check: {get_command_failure_detail(error=error)}")
         try:
             engine_update = check_engine_update()
-        except Exception:
+        except Exception as error:
             engine_update = previous_engine_update
+            errors.append(f"Docker Engine check: {get_command_failure_detail(error=error)}")
         try:
             image_updates = check_image_updates()
-        except Exception:
+        except Exception as error:
             image_updates = previous_image_updates
+            errors.append(f"Image registry check: {get_command_failure_detail(error=error)}")
         GLib.idle_add(set_update_state, icon, engine_update, image_updates, app_update)
+        GLib.idle_add(set_update_feedback, icon, False, time.time(), errors)
     finally:
         update_check_run_lock.release()
+
+
+def start_update_check(icon):
+    threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
+
+
+def format_relative_time(timestamp, now=None):
+    if timestamp is None:
+        return "not checked yet"
+    elapsed = max(0, int((time.time() if now is None else now) - timestamp))
+    if elapsed < 60:
+        return "just now"
+    if elapsed < 3600:
+        minutes = elapsed // 60
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = elapsed // 3600
+    return f"{hours} hour{'s' if hours != 1 else ''} ago"
+
+
+def get_update_check_label(_item=None):
+    feedback = get_update_feedback_snapshot()
+    if feedback["checking"]:
+        return "Checking for updates…"
+    if feedback["errors"]:
+        return f"Update check incomplete ({format_relative_time(feedback['last_checked'])})"
+    if feedback["last_checked"] is None:
+        return "Updates not checked yet"
+    return f"Updates checked {format_relative_time(feedback['last_checked'])}"
 
 
 def poll_updates(icon):
@@ -2380,7 +2469,7 @@ def finish_app_upgrade(icon, result, error):
         return GLib.SOURCE_REMOVE
 
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "upgrade command failed"
+        detail = get_authorization_failure_detail(result, "upgrade command failed")
         updates_dialog["status"] = f"Docker Tray upgrade failed: {detail}"
         if updates_dialog["window"] is not None:
             show_updates_dialog(icon)
@@ -2437,7 +2526,7 @@ def finish_docker_engine_upgrade(icon, result, error):
         destroy_updates_dialog()
         threading.Thread(target=run_update_check, args=(icon,), daemon=True).start()
     else:
-        detail = result.stderr.strip() or result.stdout.strip() or "upgrade command failed"
+        detail = get_authorization_failure_detail(result, "upgrade command failed")
         updates_dialog["status"] = f"Docker Engine upgrade failed: {detail}"
         if updates_dialog["window"] is not None:
             show_updates_dialog(icon)
@@ -2525,11 +2614,17 @@ def run_privileged_image_updates(images):
                 "cleanup_error": "",
             }
 
-    missing_detail = (
-        result.stderr.strip()
-        or (result.stdout.strip() if not outcomes else "")
-        or "The privileged image update helper did not return a result"
-    )
+    if result.returncode != 0 and not outcomes:
+        missing_detail = get_authorization_failure_detail(
+            result,
+            "The privileged image update helper did not return a result",
+        )
+    else:
+        missing_detail = (
+            result.stderr.strip()
+            or (result.stdout.strip() if not outcomes else "")
+            or "The privileged image update helper did not return a result"
+        )
     if len(missing_detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
         missing_detail = missing_detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
     for image in images:
@@ -2729,6 +2824,28 @@ def show_updates_dialog(icon):
         or updates_dialog["engine_upgrading"]
         or bool(updates_dialog["pulling_images"])
     )
+    feedback = get_update_feedback_snapshot()
+    check_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    if feedback["checking"]:
+        check_spinner = Gtk.Spinner()
+        check_spinner.start()
+        check_row.pack_start(check_spinner, False, False, 0)
+    check_label = Gtk.Label(label=get_update_check_label())
+    check_label.set_xalign(0)
+    check_label.set_hexpand(True)
+    check_row.pack_start(check_label, True, True, 0)
+    check_button = Gtk.Button(label="Checking…" if feedback["checking"] else "Check now")
+    check_button.set_sensitive(not feedback["checking"])
+    if not feedback["checking"]:
+        check_button.connect("clicked", lambda button: start_update_check(icon))
+    check_row.pack_start(check_button, False, False, 0)
+    box.pack_start(check_row, False, False, 0)
+
+    for check_error in feedback["errors"]:
+        error_label = Gtk.Label(label=f"⚠ {check_error}")
+        error_label.set_xalign(0)
+        error_label.set_line_wrap(True)
+        box.pack_start(error_label, False, False, 0)
     if app_update.available:
         app_label = Gtk.Label(label="Docker Tray update available")
         app_label.set_xalign(0)
@@ -2851,6 +2968,7 @@ def open_updates_dialog(icon, item):
 
 def get_settings_items(pystray):
     return [
+        pystray.MenuItem(get_update_check_label, open_updates_dialog),
         pystray.MenuItem("Container stats", open_container_stats_dialog),
         pystray.MenuItem("Compose search", make_compose_search_cb()),
         pystray.MenuItem("Cleanup", make_cleanup_cb()),
@@ -2867,6 +2985,7 @@ def get_menu_items(pystray):
     items = []
     app_update = get_app_update_snapshot()
     engine_update, image_updates = get_update_state_snapshot()
+    update_feedback = get_update_feedback_snapshot()
     if container_health_state["level"] == "critical":
         items.append(pystray.MenuItem("🔴 Container issue detected", open_container_stats_dialog))
     elif container_health_state["level"] == "warning":
@@ -2875,6 +2994,8 @@ def get_menu_items(pystray):
         items.append(pystray.MenuItem("⚪ Container stats unavailable", open_container_stats_dialog))
     if app_update.available or engine_update.available or image_updates:
         items.append(pystray.MenuItem("⬆️ Updates available", open_updates_dialog))
+    elif update_feedback["errors"]:
+        items.append(pystray.MenuItem("⚠️ Update check incomplete", open_updates_dialog))
     if items:
         items.append(pystray.Menu.SEPARATOR)
     if not is_docker_installed():

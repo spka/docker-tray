@@ -3,8 +3,8 @@
 Releases are built from annotated version tags by GitHub Actions. Do not build
 or upload release packages from a workstation.
 
-1. Update the version in `docker_tray.py`, `package-deb.sh`, and
-   `packaging/arch/PKGBUILD`, along with version-specific tests and README links.
+1. Update the version in `docker_tray.py` and `package-deb.sh`, along with
+   version-specific tests and README links.
 2. Run `./scripts/release-version` and the test suite.
 3. Commit and push the release changes to `main`.
 4. Create and push an annotated tag:
@@ -22,3 +22,8 @@ the release only after every earlier step succeeds.
 
 If a run fails after creating the draft, rerun the workflow. It may replace
 assets on that draft, but it refuses to alter an already-published release.
+
+The Arch/AUR recipe deliberately tracks the latest published release rather
+than an unreleased source tree. After publishing, update `pkgver`, reset
+`pkgrel` to 1, replace the source checksum, regenerate `.SRCINFO` with
+`makepkg --printsrcinfo > .SRCINFO`, and test with `makepkg --verifysource`.

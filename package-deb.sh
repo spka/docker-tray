@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.2.7}"
+version="${1:-0.2.8}"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
   echo "Version must contain two or three numeric components" >&2
   exit 2
@@ -16,6 +16,7 @@ mkdir -p \
   "$root/usr/share/polkit-1/actions" \
   "$root/usr/bin" \
   "$root/usr/lib/docker-tray" \
+  "$root/usr/lib/systemd/user" \
   "$root/usr/share/applications" \
   "$root/usr/share/docker-tray" \
   "$root/usr/share/doc/docker-tray" \
@@ -52,12 +53,13 @@ install -m 0644 icon-dark.png icon-light.png "$root/usr/share/docker-tray/"
 install -m 0644 icon-light.png "$root/usr/share/icons/hicolor/256x256/apps/docker-tray.png"
 install -m 0644 README.md "$root/usr/share/doc/docker-tray/README.md"
 install -m 0644 LICENSE "$root/usr/share/doc/docker-tray/copyright"
+install -m 0644 docker-tray.service "$root/usr/lib/systemd/user/docker-tray.service"
 
 cat > "$root/usr/share/applications/docker-tray.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Docker Tray
-Exec=docker-tray
+Exec=systemctl --user start docker-tray.service
 Icon=/usr/share/docker-tray/icon-light.png
 Comment=Docker container monitor in the system tray
 Categories=Utility;
@@ -69,7 +71,7 @@ cat > "$root/etc/xdg/autostart/docker-tray.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Docker Tray
-Exec=docker-tray
+Exec=systemctl --user start docker-tray.service
 Icon=/usr/share/docker-tray/icon-light.png
 Comment=Docker container monitor in the system tray
 Categories=Utility;

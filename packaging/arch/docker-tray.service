@@ -1,0 +1,12 @@
+[Unit]
+Description=Docker Tray
+Documentation=https://github.com/spka/docker-tray
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/docker-tray
+Restart=on-failure
+RestartSec=5s
+

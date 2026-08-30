@@ -26,12 +26,14 @@ class AppUpdateTests(unittest.TestCase):
     def setUp(self):
         self.original_app_update = docker_tray.get_app_update_snapshot()
         self.original_engine_update, self.original_image_updates = docker_tray.get_update_state_snapshot()
+        self.original_feedback = docker_tray.get_update_feedback_snapshot()
 
     def tearDown(self):
         docker_tray.update_check_state.update({
             "app_update": self.original_app_update,
             "engine_update": self.original_engine_update,
             "image_updates": self.original_image_updates,
+            **self.original_feedback,
         })
 
     def test_version_comparison_normalizes_two_and_three_part_versions(self):
@@ -250,6 +252,29 @@ class AppUpdateTests(unittest.TestCase):
         docker_tray.run_update_check(mock.Mock())
 
         self.assertEqual(existing, docker_tray.get_app_update_snapshot())
+        feedback = docker_tray.get_update_feedback_snapshot()
+        self.assertFalse(feedback["checking"])
+        self.assertIsNotNone(feedback["last_checked"])
+        self.assertIn("offline", feedback["errors"][0])
+
+    def test_update_feedback_distinguishes_checking_and_incomplete(self):
+        docker_tray.update_check_state.update({
+            "checking": True,
+            "last_checked": None,
+            "errors": (),
+        })
+        self.assertEqual("Checking for updates…", docker_tray.get_update_check_label())
+
+        docker_tray.update_check_state.update({
+            "checking": False,
+            "last_checked": 100,
+            "errors": ("registry offline",),
+        })
+        with mock.patch.object(docker_tray.time, "time", return_value=160):
+            self.assertEqual(
+                "Update check incomplete (1 minute ago)",
+                docker_tray.get_update_check_label(),
+            )
 
 
 if __name__ == "__main__":

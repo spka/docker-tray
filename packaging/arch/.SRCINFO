@@ -1,0 +1,23 @@
+pkgbase = docker-tray
+	pkgdesc = Small Docker tray utility
+	pkgver = 0.2.7
+	pkgrel = 2
+	url = https://github.com/spka/docker-tray
+	arch = any
+	license = MIT
+	depends = docker
+	depends = gtk3
+	depends = libayatana-appindicator
+	depends = python
+	depends = python-gobject
+	depends = python-pillow
+	depends = python-pystray
+	depends = polkit
+	source = docker-tray-0.2.7.tar.gz::https://github.com/spka/docker-tray/archive/refs/tags/v0.2.7.tar.gz
+	source = docker-tray.service
+	source = systemd-autostart.patch
+	sha256sums = d0a02834b9b14ba5ea1e0ec4d44238cb9dc265d9a788e0d444743592403b70d7
+	sha256sums = c115183a465aa4c0a5ad7a6da7a7a66642d8f4a2d266cd698c39216fd865900c
+	sha256sums = d9acd65ef8174f3b44b247ff48f402ddfeb68603e1e1c54d8cd703fea937f2d9
+
+pkgname = docker-tray

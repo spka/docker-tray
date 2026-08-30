@@ -3,9 +3,8 @@ set -euo pipefail
 
 app_version="$(sed -nE 's/^APP_VERSION = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' docker_tray.py)"
 package_version="$(sed -nE 's/^version="\$\{1:-([0-9]+\.[0-9]+\.[0-9]+)\}"$/\1/p' package-deb.sh)"
-arch_version="$(sed -nE 's/^pkgver=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' packaging/arch/PKGBUILD)"
 
-if [[ -z "$app_version" || -z "$package_version" || -z "$arch_version" ]]; then
+if [[ -z "$app_version" || -z "$package_version" ]]; then
   echo "Could not read all release versions" >&2
   exit 2
 fi
@@ -17,8 +16,8 @@ if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 tag_version="${tag#v}"
-if [[ "$app_version" != "$tag_version" || "$package_version" != "$tag_version" || "$arch_version" != "$tag_version" ]]; then
-  echo "Version mismatch: tag=$tag_version app=$app_version deb=$package_version arch=$arch_version" >&2
+if [[ "$app_version" != "$tag_version" || "$package_version" != "$tag_version" ]]; then
+  echo "Version mismatch: tag=$tag_version app=$app_version deb=$package_version" >&2
   exit 2
 fi
 

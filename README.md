@@ -41,6 +41,8 @@ sudo apt install ./docker-tray_0.2.7_all.deb
 ```
 
 Docker Tray starts automatically on login after installing the package.
+The desktop autostart entry launches a per-user systemd service, which restarts
+the tray after an unexpected crash and stops it with the graphical session.
 
 ## Install On Arch Linux
 
@@ -65,18 +67,22 @@ Single-image and batch image updates likewise use one authenticated helper
 transaction for discovery, pull, recreation, readiness checks, and safe removal
 of replaced images.
 
-Remote registry checks run through a four-worker pool. Successful digests are
-cached for 15 minutes and transient failures for two minutes, avoiding repeated
-`docker manifest inspect` processes during closely spaced refreshes.
+Remote registry checks run through a four-worker pool, and successful digests
+are cached for 15 minutes. The updates view reports checks in progress, the
+last completed check, and offline, Docker Engine, or registry failures instead
+of presenting failed checks as “no updates.” Cancelled privilege prompts are
+reported separately and do not imply that an operation failed midway.
 
 Automatic package installation is offered only for release assets carrying a
 GitHub SHA-256 digest. The root-owned helper copies the download into a
 root-owned directory, verifies its checksum and Debian metadata again, and only
 then invokes APT.
 
-Future release tags matching `vX.Y.Z` are built and published by GitHub Actions after
-the tag, application, Debian, and Arch versions are confirmed to match. Each
-release includes a SHA-256 checksum and GitHub build-provenance attestation.
+Future release tags matching `vX.Y.Z` are built and published by GitHub Actions
+after the tag, application, and Debian versions are confirmed to match. The AUR
+recipe independently tracks the latest published release with a verified source
+checksum and generated `.SRCINFO`. Each release includes a SHA-256 checksum and
+GitHub build-provenance attestation.
 
 ## Uninstall
 

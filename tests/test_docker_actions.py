@@ -40,6 +40,14 @@ class DockerActionTests(unittest.TestCase):
             timeout=4 * docker_tray.DOCKER_CMD_TIMEOUT_SECONDS,
         )
 
+    def test_cancelled_authorization_has_specific_feedback(self):
+        result = subprocess.CompletedProcess([], 126, "", "Error: Request dismissed")
+
+        self.assertEqual(
+            "Authorization was cancelled. No changes were made.",
+            docker_tray.get_authorization_failure_detail(result),
+        )
+
     @mock.patch.object(docker_tray, "update_tray_menu")
     @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
     @mock.patch.object(docker_tray.subprocess, "run")
