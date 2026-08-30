@@ -27,10 +27,8 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 - `Pillow` - loads the tray icon PNG.
 - `GTK3` via `gi.repository.Gtk`, `GLib`, and `Gio` - required for Wayland-aware
   URL opening and light/dark theme detection.
-- Python stdlib `subprocess` - Docker interaction through `docker ps` and
-  `docker restart`, and `docker compose -f <file> up -d`.
-- Python stdlib `shutil` - checks whether the `docker` CLI exists before trying
-  to list containers.
+- Python stdlib `subprocess` - Docker interaction through the packaged,
+  root-owned PolicyKit broker and its narrow command allowlist.
 - `~/.config/autostart/docker-tray.desktop` - managed by the tray menu's
   `Settings -> Start at boot` toggle.
 
@@ -42,8 +40,9 @@ System packages:
 sudo apt install python3-pystray python3-pil python3-gi gir1.2-gtk-3.0
 ```
 
-Docker must be installed and the current user must be allowed to run `docker ps`
-without a password.
+Docker must be installed. The packaged PolicyKit broker provides read access
+without putting the current user in the root-equivalent `docker` group, and
+prompts for administrator authentication for state-changing operations.
 
 Autostart entry:
 
@@ -80,10 +79,10 @@ pgrep -af docker_tray.py
 
 ## Current Behavior
 
-The app polls Docker state every 5 seconds and calls `icon.update_menu()` only
-when the container snapshot changes, because AppIndicator menus are not
-guaranteed to rebuild every time they open. For every container returned by
-`docker ps -a`, the app displays the container name and a submenu.
+The app keeps one read-only privileged watcher open. It reads the Docker socket
+every 5 seconds and streams sanitized snapshots to the unprivileged tray. The
+tray calls `icon.update_menu()` only when the snapshot changes, because
+AppIndicator menus are not guaranteed to rebuild every time they open.
 
 Containers are sorted alphabetically by name before the menu is built, so the
 order is stable.
@@ -254,9 +253,10 @@ path in the `Exec=` line and enables autostart.
 
 The tray menu has `Settings -> Compose search`. It opens a small GTK
 dialog before scanning. The dialog has a search-directory dropdown with common
-locations such as Home, development, Documents, Downloads, Desktop, `/srv`,
-`/opt`, `/etc`, and Whole system when those directories exist. The user can
-cancel or confirm the scan.
+locations inside the user's home, such as Home, development, Documents,
+Downloads, Desktop, and Projects when those directories exist. This boundary
+matches the PolicyKit helper's Compose path validation. The user can cancel or
+confirm the scan.
 
 When confirmed, it scans the chosen directory for:
 
@@ -305,7 +305,8 @@ for conservative cleanup candidates:
 If nothing is found, the popup says `Everything is fine`. If cleanup candidates
 are found, it lists them and shows a `Cleanup` button.
 
-The cleanup action runs these conservative prunes separately:
+The cleanup action authenticates once, then the root-owned broker runs these
+fixed conservative prunes as one transaction:
 
 ```bash
 docker container prune -f

@@ -1,5 +1,7 @@
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import docker_tray
@@ -19,6 +21,25 @@ def run_idle_callback(callback, *args):
 
 
 class DockerActionTests(unittest.TestCase):
+    @mock.patch.object(docker_tray.os, "access", return_value=True)
+    @mock.patch.object(docker_tray.Path, "is_file", return_value=True)
+    def test_docker_detection_checks_real_binary(self, is_file, access):
+        self.assertTrue(docker_tray.is_docker_installed())
+        is_file.assert_called_once_with()
+        access.assert_called_once_with(docker_tray.REAL_DOCKER, docker_tray.os.X_OK)
+
+    @mock.patch.object(docker_tray.subprocess, "run")
+    def test_cleanup_uses_one_privileged_transaction(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "cleaned\n", "")
+
+        self.assertEqual("cleaned", docker_tray.run_docker_cleanup())
+        run.assert_called_once_with(
+            ["pkexec", docker_tray.PRIVILEGED_HELPER, "cleanup"],
+            capture_output=True,
+            text=True,
+            timeout=4 * docker_tray.DOCKER_CMD_TIMEOUT_SECONDS,
+        )
+
     @mock.patch.object(docker_tray, "update_tray_menu")
     @mock.patch.object(docker_tray.threading, "Thread", ImmediateThread)
     @mock.patch.object(docker_tray.subprocess, "run")
@@ -104,11 +125,21 @@ class DockerActionTests(unittest.TestCase):
         icon = mock.Mock()
         on_finished = mock.Mock()
 
-        docker_tray.run_compose_up("compose.yml", icon, on_finished)
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            compose_file = Path(directory, "compose.yml")
+            compose_file.touch()
+            docker_tray.run_compose_up(compose_file, icon, on_finished)
 
         icon.notify.assert_not_called()
         on_finished.assert_called_once_with(True)
         update_menu.assert_called_once_with(icon)
+        self.assertEqual(compose_file.parent, run.call_args.kwargs["cwd"])
+
+    @mock.patch.object(docker_tray.Path, "home", return_value=Path.home())
+    def test_compose_scan_locations_stay_inside_home(self, _home):
+        home = Path.home().resolve()
+        for _label, location in docker_tray.get_compose_scan_locations():
+            location.resolve().relative_to(home)
 
     @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)
     @mock.patch.object(docker_tray.time, "sleep")

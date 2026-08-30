@@ -1,5 +1,10 @@
 import tempfile
 import unittest
+import hashlib
+import os
+import subprocess
+from types import SimpleNamespace
+from unittest import mock
 from pathlib import Path
 
 import docker_tray_privileged as helper
@@ -68,6 +73,44 @@ class PrivilegedHelperTests(unittest.TestCase):
                 ["compose", "-f", str(compose_file), "up", "-d"],
                 Path.home(),
             )
+
+    @mock.patch.object(helper.subprocess, "run")
+    def test_cleanup_runs_fixed_commands_in_one_helper_process(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "Done\n", "")
+
+        helper.run_cleanup()
+
+        self.assertEqual(
+            [[helper.DOCKER, *command] for command in helper.PRUNE_COMMAND_ORDER],
+            [call.args[0] for call in run.call_args_list],
+        )
+
+    @mock.patch.object(helper, "validate_update_metadata")
+    def test_update_is_copied_and_hashed_from_open_descriptor(self, validate_metadata):
+        package_data = b"trusted package bytes"
+        user = SimpleNamespace(pw_uid=os.getuid())
+        digest = f"sha256:{hashlib.sha256(package_data).hexdigest()}"
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            source = Path(directory, "update.deb")
+            destination = Path(directory, "staged.deb")
+            source.write_bytes(package_data)
+
+            helper.stage_update_package(source, "0.2.6", digest, user, destination)
+
+            self.assertEqual(package_data, destination.read_bytes())
+            validate_metadata.assert_called_once_with(destination, "0.2.6")
+
+    def test_update_rejects_invalid_digest_before_opening_package(self):
+        user = SimpleNamespace(pw_uid=os.getuid())
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+            with self.assertRaises(SystemExit):
+                helper.stage_update_package(
+                    Path(directory, "missing.deb"),
+                    "0.2.6",
+                    "untrusted",
+                    user,
+                    Path(directory, "staged.deb"),
+                )
         with self.assertRaises(SystemExit):
             helper.validate_write(
                 ["compose", "-f", "/etc/passwd", "up", "-d"],

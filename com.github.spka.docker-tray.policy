@@ -41,4 +41,28 @@
     <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/docker-tray/docker_tray_privileged.py</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">write</annotate>
   </action>
+
+  <action id="com.github.spka.docker-tray.cleanup">
+    <description>Clean unused Docker resources</description>
+    <message>Authentication is required to clean unused Docker resources</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/docker-tray/docker_tray_privileged.py</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">cleanup</annotate>
+  </action>
+
+  <action id="com.github.spka.docker-tray.install-update">
+    <description>Install a verified Docker Tray update</description>
+    <message>Authentication is required to update Docker Tray</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/docker-tray/docker_tray_privileged.py</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">install-update</annotate>
+  </action>
 </policyconfig>

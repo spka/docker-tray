@@ -31,20 +31,12 @@ packaging.
 
 ## Install On Debian/Ubuntu
 
-Install the release package and run the packaged launcher:
+Until version 0.2.6 is published as a release, build and install the package
+from a trusted checkout:
 
 ```bash
-# Download the release package to /tmp.
-curl -L -o /tmp/docker-tray_0.2.3_all.deb https://github.com/spka/docker-tray/releases/download/v0.2.3/docker-tray_0.2.3_all.deb
-
-# Make the file readable by apt's sandbox user.
-chmod 0644 /tmp/docker-tray_0.2.3_all.deb
-
-# Install or upgrade Docker Tray.
-sudo apt install /tmp/docker-tray_0.2.3_all.deb
-
-# Remove the temporary package file.
-rm /tmp/docker-tray_0.2.3_all.deb
+./package-deb.sh 0.2.6
+sudo apt install ./dist/docker-tray_0.2.6_all.deb
 ```
 
 Docker Tray starts automatically on login after installing the package.
@@ -66,7 +58,13 @@ helper provides narrowly scoped status access and asks for desktop
 authentication before state-changing Docker actions. Direct membership in the
 `docker` group is not required. A persistent read-only helper streams sanitized
 container snapshots to the tray without repeatedly launching Docker CLI
-processes.
+processes. Compose discovery and launches are limited to files inside the
+current user's home directory. Cleanup is authorized once per cleanup run.
+
+Automatic package installation is offered only for release assets carrying a
+GitHub SHA-256 digest. The root-owned helper copies the download into a
+root-owned directory, verifies its checksum and Debian metadata again, and only
+then invokes APT.
 
 ## Uninstall
 

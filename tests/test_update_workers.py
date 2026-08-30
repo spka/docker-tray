@@ -149,6 +149,7 @@ class UpdateWorkerTests(unittest.TestCase):
         self.assertEqual(["immich:v3", "wg-easy:15"], updates)
         self.assertNotIn(mock.call(digest_pin), get_local_image_id.call_args_list)
         self.assertNotIn(mock.call(digest_pin), get_remote_config_digest.call_args_list)
+        self.assertEqual(3, get_local_image_id.call_count)
 
     @mock.patch.object(docker_tray, "run_docker_capture")
     @mock.patch.object(docker_tray, "get_container_image_ids")

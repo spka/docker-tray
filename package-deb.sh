@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.2.5}"
+version="${1:-0.2.6}"
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "Version must contain two or three numeric components" >&2
+  exit 2
+fi
 package="docker-tray"
 root="dist/${package}_${version}_all"
 

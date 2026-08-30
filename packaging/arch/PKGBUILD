@@ -1,5 +1,5 @@
 pkgname=docker-tray
-pkgver=0.2.3
+pkgver=0.2.6
 pkgrel=1
 pkgdesc="Small Docker tray utility"
 arch=("any")
@@ -13,6 +13,7 @@ depends=(
   "python-gobject"
   "python-pillow"
   "python-pystray"
+  "polkit"
 )
 source=()
 sha256sums=()
@@ -22,6 +23,9 @@ package() {
 
   install -Dm755 "${repo_root}/docker_tray.py" "${pkgdir}/usr/lib/docker-tray/docker_tray.py"
   install -Dm644 "${repo_root}/docker_tray_platform.py" "${pkgdir}/usr/lib/docker-tray/docker_tray_platform.py"
+  install -Dm755 "${repo_root}/docker_tray_privileged.py" "${pkgdir}/usr/lib/docker-tray/docker_tray_privileged.py"
+  install -Dm755 "${repo_root}/docker-tray-docker" "${pkgdir}/usr/lib/docker-tray/docker"
+  install -Dm644 "${repo_root}/com.github.spka.docker-tray.policy" "${pkgdir}/usr/share/polkit-1/actions/com.github.spka.docker-tray.policy"
 
   install -Dm644 "${repo_root}/icon-dark.png" "${pkgdir}/usr/share/docker-tray/icon-dark.png"
   install -Dm644 "${repo_root}/icon-light.png" "${pkgdir}/usr/share/docker-tray/icon-light.png"
@@ -32,6 +36,8 @@ package() {
 
   install -Dm755 /dev/stdin "${pkgdir}/usr/bin/docker-tray" <<'WRAPPER'
 #!/usr/bin/env sh
+PATH=/usr/lib/docker-tray:$PATH
+export PATH
 exec python3 /usr/lib/docker-tray/docker_tray.py "$@"
 WRAPPER
 

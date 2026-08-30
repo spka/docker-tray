@@ -105,6 +105,18 @@ class AppUpdateTests(unittest.TestCase):
 
         self.assertEqual("", update.package_url)
 
+    def test_release_package_without_digest_is_not_installable(self):
+        update = docker_tray.AppUpdate(
+            True,
+            latest_version="0.3.0",
+            package_url=(
+                "https://github.com/spka/docker-tray/releases/download/v0.3.0/"
+                "docker-tray_0.3.0_all.deb"
+            ),
+        )
+
+        self.assertFalse(update.can_install)
+
     @mock.patch.object(docker_tray, "validate_app_update_package")
     @mock.patch.object(docker_tray, "urlopen")
     def test_download_verifies_release_checksum(self, urlopen, validate_package):
@@ -158,6 +170,7 @@ class AppUpdateTests(unittest.TestCase):
                 "https://github.com/spka/docker-tray/releases/download/v0.3.0/"
                 "docker-tray_0.3.0_all.deb"
             ),
+            package_digest=f"sha256:{'1' * 64}",
         )
         download.return_value = docker_tray.Path("/tmp/docker-tray_0.3.0_all.deb")
         run.return_value = subprocess.CompletedProcess([], 0)
@@ -166,7 +179,14 @@ class AppUpdateTests(unittest.TestCase):
 
         self.assertEqual(0, result.returncode)
         self.assertEqual(
-            ["pkexec", "apt-get", "install", "-y", "/tmp/docker-tray_0.3.0_all.deb"],
+            [
+                "pkexec",
+                docker_tray.PRIVILEGED_HELPER,
+                "install-update",
+                "/tmp/docker-tray_0.3.0_all.deb",
+                "0.3.0",
+                f"sha256:{'1' * 64}",
+            ],
             run.call_args.args[0],
         )
 

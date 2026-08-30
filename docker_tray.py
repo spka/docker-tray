@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import re
-import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -24,12 +24,14 @@ from PIL import Image
 import docker_tray_platform
 
 
-APP_VERSION = "0.2.5"
+APP_VERSION = "0.2.6"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
 APP_UPDATE_TIMEOUT_SECONDS = 10
 APP_UPGRADE_TIMEOUT_SECONDS = 10 * 60
+PRIVILEGED_HELPER = "/usr/lib/docker-tray/docker_tray_privileged.py"
+REAL_DOCKER = Path("/usr/bin/docker")
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Names}}\t"
@@ -114,7 +116,11 @@ class AppUpdate:
 
     @property
     def can_install(self):
-        return bool(self.package_url) and PLATFORM_INFO.is_debian_family
+        return (
+            bool(self.package_url)
+            and bool(self.package_digest)
+            and PLATFORM_INFO.is_debian_family
+        )
 
 
 compose_scan_lock = threading.Lock()
@@ -199,7 +205,16 @@ def acquire_instance_lock():
     lock_file = None
     for lock_path in get_instance_lock_paths():
         try:
-            lock_file = lock_path.open("w")
+            flags = os.O_CREAT | os.O_WRONLY | os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(lock_path, flags, 0o600)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                os.close(descriptor)
+                continue
+            os.fchmod(descriptor, 0o600)
+            lock_file = os.fdopen(descriptor, "w")
             break
         except OSError:
             continue
@@ -266,7 +281,7 @@ def format_docker_error(message):
 
 
 def is_docker_installed():
-    return shutil.which("docker") is not None
+    return REAL_DOCKER.is_file() and os.access(REAL_DOCKER, os.X_OK)
 
 
 def parse_container_watch_message(line):
@@ -397,6 +412,7 @@ def run_compose_up(compose_file, icon=None, on_finished=None):
         try:
             result = subprocess.run(
                 ["docker", "compose", "-f", str(compose_file), "up", "-d"],
+                cwd=Path(compose_file).resolve().parent,
                 capture_output=True,
                 text=True,
                 timeout=DOCKER_COMPOSE_UP_TIMEOUT_SECONDS,
@@ -808,26 +824,16 @@ def cleanup_report_has_work(report):
 
 
 def run_docker_cleanup():
-    commands = [
-        ["docker", "container", "prune", "-f"],
-        ["docker", "image", "prune", "-f"],
-        ["docker", "network", "prune", "-f"],
-        ["docker", "builder", "prune", "-f"],
-    ]
-    output = []
-    for command in commands:
-        result = run_docker_capture(command)
-        command_text = " ".join(command)
-        combined_output = "\n".join(
-            text.strip()
-            for text in (result.stdout, result.stderr)
-            if text.strip()
-        )
-        if combined_output:
-            output.append(f"$ {command_text}\n{combined_output}")
-        else:
-            output.append(f"$ {command_text}\nDone")
-    return "\n\n".join(output)
+    result = subprocess.run(
+        ["pkexec", PRIVILEGED_HELPER, "cleanup"],
+        capture_output=True,
+        text=True,
+        timeout=4 * DOCKER_CMD_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "Docker cleanup failed"
+        raise RuntimeError(detail)
+    return result.stdout.strip() or "Docker cleanup completed"
 
 
 def clear_cleanup_dialog():
@@ -1104,10 +1110,6 @@ def get_compose_scan_locations():
         ("Downloads", Path.home() / "Downloads"),
         ("Desktop", Path.home() / "Desktop"),
         ("Projects", Path.home() / "Projects"),
-        ("srv", Path("/srv")),
-        ("opt", Path("/opt")),
-        ("etc", Path("/etc")),
-        ("Whole system", Path("/")),
     ]
     locations = []
     seen = set()
@@ -2363,7 +2365,14 @@ def run_app_upgrade(update):
         Path(temp_dir).chmod(0o755)
         package_path = download_app_update(update, temp_dir)
         return subprocess.run(
-            ["pkexec", "apt-get", "install", "-y", str(package_path)],
+            [
+                "pkexec",
+                PRIVILEGED_HELPER,
+                "install-update",
+                str(package_path),
+                update.latest_version,
+                update.package_digest,
+            ],
             capture_output=True,
             text=True,
             timeout=APP_UPGRADE_TIMEOUT_SECONDS,
@@ -2376,16 +2385,17 @@ def check_image_updates():
         image for image, _container_image_id in container_refs
         if is_checkable_image(image)
     })
+    local_ids = {image: get_local_image_id(image) for image in images}
     stale_running_images = {
         image for image, container_image_id in container_refs
         if is_checkable_image(image)
         and container_image_id
-        and (local := get_local_image_id(image))
+        and (local := local_ids.get(image))
         and local != container_image_id
     }
     remote_updates = {
         image for image in images
-        if (local := get_local_image_id(image))
+        if (local := local_ids.get(image))
         and (remote := get_remote_config_digest(image))
         and local != remote
     }

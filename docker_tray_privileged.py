@@ -7,19 +7,27 @@ state-changing operations.
 """
 
 import http.client
+import hashlib
 import json
 import os
 import pwd
 import re
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 
 DOCKER = "/usr/bin/docker"
 DOCKER_SOCKET = "/var/run/docker.sock"
+APT_GET = "/usr/bin/apt-get"
+DPKG_DEB = "/usr/bin/dpkg-deb"
+MAX_UPDATE_PACKAGE_BYTES = 100 * 1024 * 1024
+UPDATE_VERSION_RE = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?\Z")
+UPDATE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 WATCH_INTERVAL_SECONDS = 5
 COMPOSE_FILE_NAMES = {
     "compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml",
@@ -72,6 +80,12 @@ PRUNE_COMMANDS = {
     ("network", "prune", "-f"),
     ("builder", "prune", "-f"),
 }
+PRUNE_COMMAND_ORDER = (
+    ("container", "prune", "-f"),
+    ("image", "prune", "-f"),
+    ("network", "prune", "-f"),
+    ("builder", "prune", "-f"),
+)
 
 
 def fail(message):
@@ -166,6 +180,98 @@ def validate_write(args, home):
     fail("write command is not permitted")
 
 
+def parse_deb_fields(output):
+    fields = {}
+    for line in output.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def validate_update_metadata(package_path, expected_version):
+    result = subprocess.run(
+        [DPKG_DEB, "--field", str(package_path), "Package", "Version", "Architecture"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        fail(result.stderr.strip() or result.stdout.strip() or "invalid Debian package")
+    expected = {
+        "Package": "docker-tray",
+        "Version": expected_version,
+        "Architecture": "all",
+    }
+    if parse_deb_fields(result.stdout) != expected:
+        fail("update package metadata does not match the release")
+
+
+def stage_update_package(raw_path, expected_version, expected_digest, user, destination):
+    if not UPDATE_VERSION_RE.fullmatch(expected_version):
+        fail("invalid update version")
+    if not UPDATE_DIGEST_RE.fullmatch(expected_digest):
+        fail("invalid update digest")
+
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        source_fd = os.open(raw_path, flags)
+    except OSError as error:
+        fail(f"cannot open update package: {error}")
+
+    digest = hashlib.sha256()
+    try:
+        metadata = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != user.pw_uid
+            or metadata.st_size <= 0
+            or metadata.st_size > MAX_UPDATE_PACKAGE_BYTES
+        ):
+            fail("update package ownership, type, or size is invalid")
+        with os.fdopen(source_fd, "rb", closefd=False) as source:
+            with destination.open("xb") as target:
+                while chunk := source.read(64 * 1024):
+                    target.write(chunk)
+                    digest.update(chunk)
+    finally:
+        os.close(source_fd)
+
+    destination.chmod(0o644)
+    if f"sha256:{digest.hexdigest()}" != expected_digest:
+        fail("update package checksum does not match the release")
+    validate_update_metadata(destination, expected_version)
+
+
+def install_update(raw_path, expected_version, expected_digest, user):
+    with tempfile.TemporaryDirectory(prefix="docker-tray-install-", dir="/var/tmp") as directory:
+        directory_path = Path(directory)
+        directory_path.chmod(0o755)
+        package_path = directory_path / f"docker-tray_{expected_version}_all.deb"
+        stage_update_package(raw_path, expected_version, expected_digest, user, package_path)
+        result = subprocess.run([APT_GET, "install", "-y", str(package_path)], timeout=600)
+        raise SystemExit(result.returncode)
+
+
+def run_cleanup():
+    output = []
+    for args in PRUNE_COMMAND_ORDER:
+        result = subprocess.run(
+            [DOCKER, *args], capture_output=True, text=True, timeout=60
+        )
+        command_text = "docker " + " ".join(args)
+        detail = "\n".join(
+            value.strip() for value in (result.stdout, result.stderr) if value.strip()
+        ) or "Done"
+        output.append(f"$ {command_text}\n{detail}")
+        if result.returncode != 0:
+            print("\n\n".join(output))
+            raise SystemExit(result.returncode)
+    print("\n\n".join(output))
+
+
 class DockerUnixConnection(http.client.HTTPConnection):
     def __init__(self):
         super().__init__("localhost", timeout=10)
@@ -248,6 +354,16 @@ def main(argv=None):
         if len(argv) != 2:
             fail("invalid watch request")
         watch_container_snapshots()
+        return
+    if mode == "cleanup":
+        if len(argv) != 2:
+            fail("invalid cleanup request")
+        run_cleanup()
+        return
+    if mode == "install-update":
+        if len(argv) != 5:
+            fail("invalid update request")
+        install_update(argv[2], argv[3], argv[4], user)
         return
     mode, raw_cwd, args = parse_request(argv)
     cwd, home = validate_context(raw_cwd, user)

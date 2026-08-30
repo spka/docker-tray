@@ -20,5 +20,10 @@ case "${1-}" in
         ;;
 esac
 
+request_cwd=${HOME:-$PWD}
+if [ "${1-}" = "compose" ]; then
+    request_cwd=$PWD
+fi
+
 exec /usr/bin/pkexec /usr/lib/docker-tray/docker_tray_privileged.py \
-    "$mode" --cwd "$PWD" -- "$@"
+    "$mode" --cwd "$request_cwd" -- "$@"
