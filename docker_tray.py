@@ -50,7 +50,7 @@ from docker_tray_updates import (
 )
 
 
-APP_VERSION = "0.2.10"
+APP_VERSION = "0.2.11"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
@@ -578,13 +578,41 @@ def compose_file_label(compose_file):
     return docker_tray_compose.label(compose_file, Path.home())
 
 
+def set_tray_menu_open(icon, menu_open):
+    with tray_menu_update_state.lock:
+        tray_menu_update_state.menu_open = menu_open
+        run_pending = not menu_open and tray_menu_update_state.pending
+    if run_pending:
+        GLib.idle_add(run_pending_tray_menu_update, icon)
+    return GLib.SOURCE_REMOVE
+
+
+def track_tray_menu_visibility(icon):
+    menu = getattr(icon, "_menu_handle", None)
+    if menu is None or not hasattr(menu, "connect"):
+        return GLib.SOURCE_REMOVE
+    with tray_menu_update_state.lock:
+        if tray_menu_update_state.tracked_menu is menu:
+            return GLib.SOURCE_REMOVE
+        tray_menu_update_state.tracked_menu = menu
+    menu.connect("show", lambda *_args: set_tray_menu_open(icon, True))
+    menu.connect("hide", lambda *_args: set_tray_menu_open(icon, False))
+    return GLib.SOURCE_REMOVE
+
+
 def run_pending_tray_menu_update(icon):
+    with tray_menu_update_state.lock:
+        if tray_menu_update_state.menu_open:
+            return GLib.SOURCE_REMOVE
+        tray_menu_update_state.pending = False
     try:
         icon.update_menu()
     except Exception:
         pass
-    with tray_menu_update_state.lock:
-        tray_menu_update_state.pending = False
+    else:
+        # AppIndicator schedules its native menu replacement for a later GTK
+        # idle cycle, so attach visibility signals in the following cycle.
+        GLib.idle_add(track_tray_menu_visibility, icon)
     return GLib.SOURCE_REMOVE
 
 
@@ -1750,6 +1778,7 @@ def open_container_stats_dialog(icon, item):
 
 
 def start_menu_polling(icon):
+    GLib.idle_add(track_tray_menu_visibility, icon)
     icon.visible = True
     watch_theme(icon)
     start_background(watch_container_status, icon)
