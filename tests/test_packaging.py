@@ -9,9 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PackagingTests(unittest.TestCase):
     def test_versions_match(self):
-        self.assertEqual("0.2.12", docker_tray.APP_VERSION)
+        self.assertEqual("0.2.13", docker_tray.APP_VERSION)
         self.assertIn("pkgver=0.2.7", (ROOT / "packaging/arch/PKGBUILD").read_text())
-        self.assertIn('version="${1:-0.2.12}"', (ROOT / "package-deb.sh").read_text())
+        self.assertIn('version="${1:-0.2.13}"', (ROOT / "package-deb.sh").read_text())
 
     def test_arch_package_contains_security_integration(self):
         package = (ROOT / "packaging/arch/PKGBUILD").read_text()
@@ -71,19 +71,19 @@ class PackagingTests(unittest.TestCase):
         import subprocess
 
         result = subprocess.run(
-            [ROOT / "scripts/release-version", "v0.2.12"],
+            [ROOT / "scripts/release-version", "v0.2.13"],
             cwd=ROOT,
             capture_output=True,
             text=True,
             check=True,
         )
-        self.assertEqual("0.2.12", result.stdout.strip())
+        self.assertEqual("0.2.13", result.stdout.strip())
 
     def test_release_version_script_rejects_mismatched_tag(self):
         import subprocess
 
         result = subprocess.run(
-            [ROOT / "scripts/release-version", "v0.2.13"],
+            [ROOT / "scripts/release-version", "v0.2.14"],
             cwd=ROOT,
             capture_output=True,
             text=True,

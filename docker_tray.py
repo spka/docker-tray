@@ -50,7 +50,7 @@ from docker_tray_updates import (
 )
 
 
-APP_VERSION = "0.2.12"
+APP_VERSION = "0.2.13"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
@@ -581,16 +581,53 @@ def compose_file_label(compose_file):
 def update_tray_menu(icon):
     # GNOME renders AppIndicator menus remotely over D-Bus. Replacing the
     # exported menu from a background poll can close a menu that the user is
-    # navigating, and the protocol provides no reliable open/closed signal.
-    # Keep the cached state current and let the explicit Refresh action rebuild
-    # the native menu after its activation has already closed the old menu.
+    # navigating. Mark it dirty instead; the D-Bus about-to-show callback
+    # rebuilds it synchronously before GNOME displays the next opening.
     with tray_menu_update_state.lock:
         tray_menu_update_state.pending = True
 
 
-def refresh_tray_menu(icon, item):
+def refresh_tray_menu_before_show(_root, icon):
     with tray_menu_update_state.lock:
+        if not tray_menu_update_state.pending:
+            return False
         tray_menu_update_state.pending = False
+
+    # pystray decorates the backend update with an idle callback. We are already
+    # on GTK's main loop and must finish the replacement before AboutToShow
+    # returns, so invoke the undecorated backend implementation synchronously.
+    backend_update = getattr(icon._update_menu, "__wrapped__", None)
+    if backend_update is None:
+        with tray_menu_update_state.lock:
+            tray_menu_update_state.pending = True
+        return False
+    try:
+        backend_update(icon)
+        track_tray_menu_pre_show(icon)
+    except Exception:
+        with tray_menu_update_state.lock:
+            tray_menu_update_state.pending = True
+        return False
+    return True
+
+
+def track_tray_menu_pre_show(icon):
+    indicator = getattr(icon, "_appindicator", None)
+    if indicator is None:
+        return GLib.SOURCE_REMOVE
+    try:
+        server = indicator.get_property("dbus-menu-server")
+        root = server.get_property("root-node") if server is not None else None
+    except Exception:
+        return GLib.SOURCE_REMOVE
+    if root is None:
+        return GLib.SOURCE_REMOVE
+    with tray_menu_update_state.lock:
+        if tray_menu_update_state.tracked_root is root:
+            return GLib.SOURCE_REMOVE
+        tray_menu_update_state.tracked_root = root
+    root.connect("about-to-show", refresh_tray_menu_before_show, icon)
+    return GLib.SOURCE_REMOVE
 
 
 def count_unique_output_lines(output):
@@ -1748,6 +1785,7 @@ def open_container_stats_dialog(icon, item):
 
 def start_menu_polling(icon):
     icon.visible = True
+    GLib.idle_add(track_tray_menu_pre_show, icon)
     watch_theme(icon)
     start_background(watch_container_status, icon)
     start_background(poll_updates, icon)
@@ -2803,7 +2841,6 @@ def get_menu_items(pystray):
 
     items += [
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("↻ Refresh status", refresh_tray_menu),
         pystray.MenuItem(
             "Settings",
             pystray.Menu(lambda: get_settings_items(pystray)),

@@ -82,6 +82,7 @@ class RemoteDigestCache:
 @dataclass
 class TrayMenuUpdateState:
     pending: bool = False
+    tracked_root: Any = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
