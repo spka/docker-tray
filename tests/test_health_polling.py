@@ -55,6 +55,14 @@ class HealthPollingTests(unittest.TestCase):
 
         update_menu.assert_not_called()
 
+    @mock.patch.object(docker_tray, "update_tray_menu")
+    def test_non_alerting_health_transition_does_not_rebuild_menu(self, update_menu):
+        docker_tray.container_health_state.level = "ok"
+
+        docker_tray.set_container_health_level(mock.Mock(), "idle")
+
+        update_menu.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

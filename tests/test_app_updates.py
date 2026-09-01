@@ -283,6 +283,38 @@ class AppUpdateTests(unittest.TestCase):
                 docker_tray.get_update_check_label(),
             )
 
+    @mock.patch.object(docker_tray, "update_tray_menu")
+    def test_background_update_progress_does_not_rebuild_menu(self, update_menu):
+        state = docker_tray.update_check_state
+        state.app_update = docker_tray.AppUpdate(False)
+        state.engine_update = docker_tray.docker_tray_platform.EngineUpdate(False)
+        state.image_updates = []
+        state.checking = False
+        state.last_checked = None
+        state.errors = ()
+
+        docker_tray.set_update_feedback(mock.Mock(), True)
+        docker_tray.set_update_feedback(mock.Mock(), False, last_checked=100, errors=())
+
+        update_menu.assert_not_called()
+
+    @mock.patch.object(docker_tray, "update_tray_menu")
+    def test_new_update_notice_rebuilds_menu_once(self, update_menu):
+        state = docker_tray.update_check_state
+        state.app_update = docker_tray.AppUpdate(False)
+        state.engine_update = docker_tray.docker_tray_platform.EngineUpdate(False)
+        state.image_updates = []
+        state.errors = ()
+        icon = mock.Mock()
+
+        docker_tray.set_update_state(
+            icon,
+            docker_tray.docker_tray_platform.EngineUpdate(False),
+            ["example:latest"],
+        )
+
+        update_menu.assert_called_once_with(icon)
+
 
 if __name__ == "__main__":
     unittest.main()

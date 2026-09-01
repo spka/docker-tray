@@ -50,7 +50,7 @@ from docker_tray_updates import (
 )
 
 
-APP_VERSION = "0.2.9"
+APP_VERSION = "0.2.10"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
@@ -1519,10 +1519,16 @@ def compute_health(summary, system_mem_total):
     )
 
 
+def get_container_health_menu_notice(level):
+    return level if level in {"critical", "warning", "unknown"} else None
+
+
 def set_container_health_level(icon, level):
+    previous_notice = get_container_health_menu_notice(container_health_state.level)
     if level != container_health_state.level:
         container_health_state.level = level
-        update_tray_menu(icon)
+        if get_container_health_menu_notice(level) != previous_notice:
+            update_tray_menu(icon)
 
 
 def poll_container_stats_once(icon):
@@ -2054,8 +2060,22 @@ def get_update_feedback_snapshot():
         }
 
 
+def get_update_menu_notice(app_update, engine_update, image_updates, errors):
+    if app_update.available or engine_update.available or image_updates:
+        return "updates"
+    if errors:
+        return "error"
+    return None
+
+
 def set_update_feedback(icon, checking, last_checked=None, errors=None):
     with update_check_state.lock:
+        previous_notice = get_update_menu_notice(
+            update_check_state.app_update,
+            update_check_state.engine_update,
+            update_check_state.image_updates,
+            update_check_state.errors,
+        )
         changed = update_check_state.checking != checking
         update_check_state.checking = checking
         if last_checked is not None:
@@ -2065,8 +2085,15 @@ def set_update_feedback(icon, checking, last_checked=None, errors=None):
             errors = tuple(errors)
             changed = changed or update_check_state.errors != errors
             update_check_state.errors = errors
+        notice_changed = previous_notice != get_update_menu_notice(
+            update_check_state.app_update,
+            update_check_state.engine_update,
+            update_check_state.image_updates,
+            update_check_state.errors,
+        )
     if changed:
-        update_tray_menu(icon)
+        if notice_changed:
+            update_tray_menu(icon)
         if updates_dialog.window is not None:
             show_updates_dialog(icon)
     return GLib.SOURCE_REMOVE
@@ -2074,6 +2101,12 @@ def set_update_feedback(icon, checking, last_checked=None, errors=None):
 
 def set_update_state(icon, engine_update, image_updates, app_update=None):
     with update_check_state.lock:
+        previous_notice = get_update_menu_notice(
+            update_check_state.app_update,
+            update_check_state.engine_update,
+            update_check_state.image_updates,
+            update_check_state.errors,
+        )
         if app_update is None:
             app_update = update_check_state.app_update
         app_update_became_available = (
@@ -2088,8 +2121,15 @@ def set_update_state(icon, engine_update, image_updates, app_update=None):
         update_check_state.app_update = app_update
         update_check_state.engine_update = engine_update
         update_check_state.image_updates = image_updates
+        notice_changed = previous_notice != get_update_menu_notice(
+            update_check_state.app_update,
+            update_check_state.engine_update,
+            update_check_state.image_updates,
+            update_check_state.errors,
+        )
     if changed:
-        update_tray_menu(icon)
+        if notice_changed:
+            update_tray_menu(icon)
         if updates_dialog.window is not None:
             show_updates_dialog(icon)
     if app_update_became_available:
