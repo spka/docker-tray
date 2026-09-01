@@ -81,6 +81,10 @@ class PrivilegedHelperTests(unittest.TestCase):
             "image", "inspect", "--format", "{{.Id}}",
             "example/app:latest", "example/worker:latest",
         ])
+        helper.validate_read([
+            "image", "inspect", "--format", helper.IMAGE_METADATA_FORMAT,
+            "example/app:latest", "example/worker:latest",
+        ])
 
     def test_rejects_arbitrary_read_command(self):
         with self.assertRaises(SystemExit):

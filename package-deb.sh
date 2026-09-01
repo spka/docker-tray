@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.2.8}"
+version="${1:-0.2.9}"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
   echo "Version must contain two or three numeric components" >&2
   exit 2

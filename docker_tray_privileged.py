@@ -44,6 +44,7 @@ CONTAINER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 OBJECT_ID_RE = re.compile(r"(?:sha256:)?[0-9a-f]{12,64}\Z")
 IMAGE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./:@+-]{0,511}\Z")
 FULL_IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+IMAGE_METADATA_FORMAT = "{{.Id}}\t{{json .RepoDigests}}"
 
 PS_CONTAINERS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 PS_COMPOSE_FORMAT = (
@@ -139,7 +140,9 @@ def validate_read(args):
         if args[2] in INSPECT_FORMATS and all(valid_id(value) for value in args[3:]):
             return
     if len(args) >= 5 and args[:3] == ["image", "inspect", "--format"]:
-        if args[3] == "{{.Id}}" and all(valid_image(image) for image in args[4:]):
+        if args[3] in {"{{.Id}}", IMAGE_METADATA_FORMAT} and all(
+            valid_image(image) for image in args[4:]
+        ):
             return
     fail("read command is not permitted")
 

@@ -150,12 +150,12 @@ class UpdateWorkerTests(unittest.TestCase):
         self.assertEqual(2, get_remote_digest.call_count)
 
     @mock.patch.object(docker_tray, "ThreadPoolExecutor")
-    @mock.patch.object(docker_tray, "get_local_image_ids")
+    @mock.patch.object(docker_tray, "get_local_image_metadata")
     @mock.patch.object(docker_tray, "get_container_image_refs")
     def test_registry_checks_use_bounded_worker_pool(
         self,
         get_container_refs,
-        get_local_image_ids,
+        get_local_image_metadata,
         executor,
     ):
         images = [f"example-{index}:latest" for index in range(6)]
@@ -163,7 +163,10 @@ class UpdateWorkerTests(unittest.TestCase):
         get_container_refs.return_value = [
             (image, image_ids[image]) for image in images
         ]
-        get_local_image_ids.return_value = image_ids
+        get_local_image_metadata.return_value = {
+            image: docker_tray.LocalImageMetadata(image_id, True)
+            for image, image_id in image_ids.items()
+        }
         executor.return_value.__enter__.return_value.map.return_value = [
             image_ids[image] for image in images
         ]
@@ -173,15 +176,15 @@ class UpdateWorkerTests(unittest.TestCase):
         executor.assert_called_once_with(max_workers=docker_tray.REMOTE_DIGEST_WORKERS)
         map_call = executor.return_value.__enter__.return_value.map.call_args
         self.assertEqual(images, list(map_call.args[1]))
-        get_local_image_ids.assert_called_once_with(images)
+        get_local_image_metadata.assert_called_once_with(images)
 
     @mock.patch.object(docker_tray, "get_remote_config_digest")
-    @mock.patch.object(docker_tray, "get_local_image_ids")
+    @mock.patch.object(docker_tray, "get_local_image_metadata")
     @mock.patch.object(docker_tray, "get_container_image_refs")
     def test_image_update_check_includes_moving_major_tags(
         self,
         get_container_refs,
-        get_local_image_ids,
+        get_local_image_metadata,
         get_remote_config_digest,
     ):
         digest_pin = "pinned@sha256:" + "4" * 64
@@ -196,7 +199,10 @@ class UpdateWorkerTests(unittest.TestCase):
             "immich:v3": "sha256:old-immich",
             "fixed:15.2.2": "sha256:fixed",
         }
-        get_local_image_ids.return_value = local_ids
+        get_local_image_metadata.return_value = {
+            image: docker_tray.LocalImageMetadata(image_id, True)
+            for image, image_id in local_ids.items()
+        }
         get_remote_config_digest.side_effect = {
             "wg-easy:15": "sha256:new-wg",
             "immich:v3": "sha256:new-immich",
@@ -206,27 +212,30 @@ class UpdateWorkerTests(unittest.TestCase):
         updates = docker_tray.check_image_updates()
 
         self.assertEqual(["immich:v3", "wg-easy:15"], updates)
-        get_local_image_ids.assert_called_once_with(sorted(local_ids))
+        get_local_image_metadata.assert_called_once_with(sorted(local_ids))
         self.assertNotIn(mock.call(digest_pin), get_remote_config_digest.call_args_list)
 
     @mock.patch.object(docker_tray.subprocess, "run")
-    def test_local_image_ids_use_one_batched_command(self, run):
+    def test_local_image_metadata_uses_one_batched_command(self, run):
         run.return_value = subprocess.CompletedProcess(
             [],
             0,
-            "sha256:one\nsha256:two\n",
+            (
+                'sha256:one\t["one:latest@sha256:' + "a" * 64 + '"]\n'
+                "sha256:two\tnull\n"
+            ),
             "",
         )
 
-        result = docker_tray.get_local_image_ids(["one:latest", "two:latest"])
+        result = docker_tray.get_local_image_metadata(["one:latest", "two:latest"])
 
         self.assertEqual({
-            "one:latest": "sha256:one",
-            "two:latest": "sha256:two",
+            "one:latest": docker_tray.LocalImageMetadata("sha256:one", True),
+            "two:latest": docker_tray.LocalImageMetadata("sha256:two", False),
         }, result)
         run.assert_called_once_with(
             docker_tray.docker_tray_runtime.docker_command(
-                "image", "inspect", "--format", "{{.Id}}",
+                "image", "inspect", "--format", docker_tray.DOCKER_IMAGE_METADATA_FORMAT,
                 "one:latest", "two:latest",
             ),
             capture_output=True,
@@ -239,7 +248,30 @@ class UpdateWorkerTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 1, "", "missing image")
 
         with self.assertRaisesRegex(RuntimeError, "missing image"):
-            docker_tray.get_local_image_ids(["missing:latest"])
+            docker_tray.get_local_image_metadata(["missing:latest"])
+
+    @mock.patch.object(docker_tray, "get_remote_config_digest")
+    @mock.patch.object(docker_tray, "get_local_image_metadata")
+    @mock.patch.object(docker_tray, "get_container_image_refs")
+    def test_locally_built_images_are_not_queried_from_a_registry(
+        self,
+        get_container_refs,
+        get_local_image_metadata,
+        get_remote_config_digest,
+    ):
+        images = {
+            "feedr-feedr": "sha256:local",
+            "feedr-gpt-worker": "sha256:worker",
+        }
+        get_container_refs.return_value = list(images.items())
+        get_local_image_metadata.return_value = {
+            image: docker_tray.LocalImageMetadata(image_id, False)
+            for image, image_id in images.items()
+        }
+
+        self.assertEqual([], docker_tray.check_image_updates())
+
+        get_remote_config_digest.assert_not_called()
 
     @mock.patch.object(docker_tray, "finish_image_pull")
     @mock.patch.object(docker_tray.GLib, "idle_add", side_effect=run_idle_callback)

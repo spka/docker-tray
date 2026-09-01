@@ -1,3 +1,4 @@
+import ast
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,21 @@ import docker_tray_runtime
 import docker_tray_ui
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class RuntimeGatewayTests(unittest.TestCase):
+    def test_application_routes_command_lists_through_gateway(self):
+        tree = ast.parse((ROOT / "docker_tray.py").read_text())
+        raw_docker_commands = [
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.List, ast.Tuple))
+            and node.elts
+            and isinstance(node.elts[0], ast.Constant)
+            and node.elts[0].value == "docker"
+        ]
+        self.assertEqual([], raw_docker_commands)
+
     def test_packaged_gateway_is_used_explicitly(self):
         with tempfile.TemporaryDirectory() as directory:
             gateway = Path(directory) / "docker"

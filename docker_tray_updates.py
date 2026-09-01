@@ -2,6 +2,13 @@
 
 import re
 import time
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class LocalImageMetadata:
+    image_id: str
+    registry_backed: bool
 
 
 def get_manifest_config_digest(manifest):

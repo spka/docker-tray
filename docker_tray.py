@@ -41,6 +41,7 @@ from docker_tray_state import (
 from docker_tray_ui import DialogController
 from docker_tray_stats import format_bytes, format_ts, parse_cpu_pct, parse_mem_bytes
 from docker_tray_updates import (
+    LocalImageMetadata,
     format_relative_time,
     get_manifest_config_digest,
     is_checkable_image,
@@ -49,7 +50,7 @@ from docker_tray_updates import (
 )
 
 
-APP_VERSION = "0.2.8"
+APP_VERSION = "0.2.9"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
@@ -63,6 +64,7 @@ DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Label \"com.docker.compose.project.config_files\"}}\t"
     "{{.Label \"com.docker.compose.project.working_dir\"}}"
 )
+DOCKER_IMAGE_METADATA_FORMAT = "{{.Id}}\t{{json .RepoDigests}}"
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
 COMPOSE_START_POLL_SECONDS = 2
@@ -603,59 +605,44 @@ def output_line_set(output):
 
 
 def get_container_image_ids():
-    container_result = run_docker_capture([
-        "docker",
-        "ps",
-        "-a",
-        "-q",
-    ])
+    container_result = run_docker_capture(
+        docker_tray_runtime.docker_command("ps", "-a", "-q"),
+    )
     container_ids = sorted(output_line_set(container_result.stdout))
     if not container_ids:
         return set()
 
-    result = run_docker_capture([
-        "docker",
-        "inspect",
-        "--format",
-        "{{.Image}}",
-        *container_ids,
-    ])
+    result = run_docker_capture(
+        docker_tray_runtime.docker_command(
+            "inspect", "--format", "{{.Image}}", *container_ids,
+        ),
+    )
     return output_line_set(result.stdout)
 
 
 def get_removable_dangling_image_count():
-    dangling_result = run_docker_capture([
-        "docker",
-        "images",
-        "--filter",
-        "dangling=true",
-        "--no-trunc",
-        "-q",
-    ])
+    dangling_result = run_docker_capture(
+        docker_tray_runtime.docker_command(
+            "images", "--filter", "dangling=true", "--no-trunc", "-q",
+        ),
+    )
     dangling_images = output_line_set(dangling_result.stdout)
     container_images = get_container_image_ids()
     return len(dangling_images - container_images)
 
 
 def get_docker_cleanup_report():
-    stopped_result = run_docker_capture([
-        "docker",
-        "ps",
-        "-a",
-        "--filter",
-        "status=exited",
-        "--filter",
-        "status=created",
-        "-q",
-    ])
-    unused_networks_result = run_docker_capture([
-        "docker",
-        "network",
-        "ls",
-        "--filter",
-        "dangling=true",
-        "-q",
-    ])
+    stopped_result = run_docker_capture(
+        docker_tray_runtime.docker_command(
+            "ps", "-a", "--filter", "status=exited",
+            "--filter", "status=created", "-q",
+        ),
+    )
+    unused_networks_result = run_docker_capture(
+        docker_tray_runtime.docker_command(
+            "network", "ls", "--filter", "dangling=true", "-q",
+        ),
+    )
 
     report = [
         ("Stopped containers", count_unique_output_lines(stopped_result.stdout), None),
@@ -664,13 +651,11 @@ def get_docker_cleanup_report():
     ]
 
     try:
-        df_result = run_docker_capture([
-            "docker",
-            "system",
-            "df",
-            "--format",
-            "{{.Type}}\t{{.Reclaimable}}",
-        ])
+        df_result = run_docker_capture(
+            docker_tray_runtime.docker_command(
+                "system", "df", "--format", "{{.Type}}\t{{.Reclaimable}}",
+            ),
+        )
         for line in df_result.stdout.splitlines():
             parts = line.split("\t", 1)
             if len(parts) != 2 or parts[0] != "Build Cache":
@@ -1435,13 +1420,12 @@ def get_container_restart_counts():
     if not container_ids:
         return {}
 
-    result = run_docker_capture([
-        "docker",
-        "inspect",
-        "--format",
-        "{{.Name}}\t{{.RestartCount}}",
-        *container_ids,
-    ], check=False)
+    result = run_docker_capture(
+        docker_tray_runtime.docker_command(
+            "inspect", "--format", "{{.Name}}\t{{.RestartCount}}", *container_ids,
+        ),
+        check=False,
+    )
     counts = {}
     for line in result.stdout.strip().splitlines():
         parts = line.split("\t", 1)
@@ -1802,13 +1786,13 @@ def check_engine_update():
     return docker_tray_platform.check_engine_update(DOCKER_CMD_TIMEOUT_SECONDS, PLATFORM_INFO)
 
 
-def get_local_image_ids(images):
+def get_local_image_metadata(images):
     images = list(images)
     if not images:
         return {}
     result = subprocess.run(
         docker_tray_runtime.docker_command(
-            "image", "inspect", "--format", "{{.Id}}", *images,
+            "image", "inspect", "--format", DOCKER_IMAGE_METADATA_FORMAT, *images,
         ),
         capture_output=True, text=True,
         timeout=DOCKER_CMD_TIMEOUT_SECONDS,
@@ -1816,10 +1800,24 @@ def get_local_image_ids(images):
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "image inspection failed"
         raise RuntimeError(detail)
-    image_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(image_ids) != len(images):
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) != len(images):
         raise RuntimeError("Docker returned an incomplete image inspection result")
-    return dict(zip(images, image_ids))
+    metadata = {}
+    for image, line in zip(images, lines):
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            raise RuntimeError("Docker returned invalid image metadata")
+        image_id, raw_repo_digests = parts
+        try:
+            repo_digests = json.loads(raw_repo_digests)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeError("Docker returned invalid repository digests") from error
+        metadata[image] = LocalImageMetadata(
+            image_id=image_id,
+            registry_backed=isinstance(repo_digests, list) and bool(repo_digests),
+        )
+    return metadata
 
 
 def get_container_image_refs():
@@ -1831,13 +1829,12 @@ def get_container_image_refs():
     if not container_ids:
         return []
 
-    result = run_docker_capture([
-        "docker",
-        "inspect",
-        "--format",
-        "{{.Config.Image}}\t{{.Image}}",
-        *container_ids,
-    ], check=False)
+    result = run_docker_capture(
+        docker_tray_runtime.docker_command(
+            "inspect", "--format", "{{.Config.Image}}\t{{.Image}}", *container_ids,
+        ),
+        check=False,
+    )
     refs = []
     for line in result.stdout.strip().splitlines():
         parts = line.split("\t", 1)
@@ -2006,22 +2003,29 @@ def check_image_updates():
         image for image, _container_image_id in container_refs
         if is_checkable_image(image)
     })
-    local_ids = get_local_image_ids(images)
+    local_metadata = get_local_image_metadata(images)
+    registry_images = [
+        image for image in images
+        if (metadata := local_metadata.get(image)) and metadata.registry_backed
+    ]
     stale_running_images = {
         image for image, container_image_id in container_refs
-        if is_checkable_image(image)
+        if image in registry_images
         and container_image_id
-        and (local := local_ids.get(image))
+        and (local := local_metadata[image].image_id)
         and local != container_image_id
     }
     remote_ids = {}
-    if images:
-        worker_count = min(REMOTE_DIGEST_WORKERS, len(images))
+    if registry_images:
+        worker_count = min(REMOTE_DIGEST_WORKERS, len(registry_images))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            remote_ids = dict(zip(images, executor.map(get_cached_remote_config_digest, images)))
+            remote_ids = dict(zip(
+                registry_images,
+                executor.map(get_cached_remote_config_digest, registry_images),
+            ))
     remote_updates = {
-        image for image in images
-        if (local := local_ids.get(image))
+        image for image in registry_images
+        if (local := local_metadata[image].image_id)
         and (remote := remote_ids.get(image))
         and local != remote
     }
