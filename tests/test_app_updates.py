@@ -280,9 +280,11 @@ class AppUpdateTests(unittest.TestCase):
             state.checking = False
             state.last_checked = None
             state.errors = ()
-            self.service.set_update_feedback(mock.Mock(), True)
-            self.service.set_update_feedback(mock.Mock(), False, last_checked=100, errors=())
-            update_menu.assert_not_called()
+            icon = mock.Mock()
+            self.service.set_update_feedback(icon, True)
+            self.service.set_update_feedback(icon, False, last_checked=100, errors=())
+            self.assertEqual(2, update_menu.call_count)
+            icon.update_menu.assert_not_called()
 
     def test_new_update_notice_rebuilds_menu_once(self):
         with mock.patch.object(docker_tray, "update_tray_menu") as update_menu:

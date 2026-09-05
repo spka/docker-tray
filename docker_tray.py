@@ -1713,8 +1713,13 @@ def watch_container_status(icon):
 
 
 def on_updates_changed(icon, notice_changed):
+    # Feedback changes also invalidate the Settings timestamp. Update notices
+    # must be exported immediately: pystray can replace the menu after an
+    # action, leaving its new root without our about-to-show callback.
+    update_tray_menu(icon)
     if notice_changed:
-        update_tray_menu(icon)
+        icon.update_menu()
+        GLib.idle_add(track_tray_menu_pre_show, icon)
     updates_dialog.refresh(icon)
 
 

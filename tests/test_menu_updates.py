@@ -23,6 +23,27 @@ class TrayMenuUpdateTests(unittest.TestCase):
         icon.update_menu.assert_not_called()
         self.assertTrue(docker_tray.tray_menu_update_state.pending)
 
+    @mock.patch.object(docker_tray.updates_dialog, "refresh")
+    @mock.patch.object(docker_tray.GLib, "idle_add")
+    def test_update_notice_change_exports_menu_without_waiting_for_open(self, idle, refresh):
+        icon = mock.Mock()
+
+        docker_tray.on_updates_changed(icon, True)
+
+        icon.update_menu.assert_called_once_with()
+        idle.assert_called_once_with(docker_tray.track_tray_menu_pre_show, icon)
+        refresh.assert_called_once_with(icon)
+
+    @mock.patch.object(docker_tray.updates_dialog, "refresh")
+    def test_update_feedback_invalidates_settings_timestamp(self, refresh):
+        icon = mock.Mock()
+
+        docker_tray.on_updates_changed(icon, False)
+
+        self.assertTrue(docker_tray.tray_menu_update_state.pending)
+        icon.update_menu.assert_not_called()
+        refresh.assert_called_once_with(icon)
+
     @mock.patch.object(docker_tray, "track_tray_menu_pre_show")
     def test_dirty_menu_refreshes_synchronously_before_show(self, track):
         icon = mock.Mock()
