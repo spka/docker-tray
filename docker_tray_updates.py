@@ -6,6 +6,25 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class AppUpdate:
+    available: bool
+    latest_version: str = ""
+    release_url: str = "https://github.com/spka/docker-tray/releases"
+    package_url: str = ""
+    package_digest: str = ""
+
+    install_supported: bool = True
+
+    @property
+    def can_install(self):
+        return (
+            bool(self.package_url)
+            and bool(self.package_digest)
+            and self.install_supported
+        )
+
+
+@dataclass(frozen=True)
 class LocalImageMetadata:
     image_id: str
     registry_backed: bool

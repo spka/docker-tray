@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 import fcntl
-import hashlib
 import json
 import os
 import re
 import stat
 import subprocess
-import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 import gi
 
@@ -32,31 +27,21 @@ from docker_tray_state import (
     ContainerHealthState,
     ContainerWatchState,
     DesktopNotificationState,
-    RemoteDigestCache,
     StatsHistoryState,
     TrayMenuUpdateState,
-    UpdateCheckState,
-    UpdatesDialogState,
 )
 from docker_tray_ui import DialogController
 from docker_tray_stats import format_bytes, format_ts, parse_cpu_pct, parse_mem_bytes
-from docker_tray_updates import (
-    ImageUpdateCheckError,
-    LocalImageMetadata,
-    format_relative_time,
-    get_manifest_config_digest,
-    is_checkable_image,
-    is_image_id_reference,
-    parse_app_version,
+from docker_tray_update_service import UpdateService
+from docker_tray_update_backend import UpdateBackend
+from docker_tray_updates_dialog import UpdatesDialog
+from docker_tray_commands import (
+    format_docker_error, get_command_failure_detail, get_authorization_failure_detail,
 )
+from docker_tray_ui import make_dialog_box, add_bottom_button_row
 
 
 APP_VERSION = "0.2.14"
-APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
-APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
-APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
-APP_UPDATE_TIMEOUT_SECONDS = 10
-APP_UPGRADE_TIMEOUT_SECONDS = 10 * 60
 REAL_DOCKER = docker_tray_runtime.REAL_DOCKER
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
@@ -65,20 +50,12 @@ DOCKER_COMPOSE_LABEL_FORMAT = (
     "{{.Label \"com.docker.compose.project.config_files\"}}\t"
     "{{.Label \"com.docker.compose.project.working_dir\"}}"
 )
-DOCKER_IMAGE_METADATA_FORMAT = "{{.Id}}\t{{json .RepoDigests}}"
 HOST_PORT_RE = re.compile(r"(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->\d+/tcp")
 MENU_REFRESH_SECONDS = 5
 COMPOSE_START_POLL_SECONDS = 2
 COMPOSE_START_POLL_ATTEMPTS = 30
-UPDATE_CHECK_INTERVAL_SECONDS = 3600
 DOCKER_CMD_TIMEOUT_SECONDS = 15
-DOCKER_MANIFEST_TIMEOUT_SECONDS = 30
 DOCKER_COMPOSE_UP_TIMEOUT_SECONDS = 3 * 60
-DOCKER_ENGINE_UPGRADE_TIMEOUT_SECONDS = 30 * 60
-DOCKER_IMAGE_UPDATE_TIMEOUT_SECONDS = 15 * 60
-REMOTE_DIGEST_CACHE_SECONDS = 15 * 60
-REMOTE_DIGEST_FAILURE_CACHE_SECONDS = 2 * 60
-REMOTE_DIGEST_WORKERS = 4
 COMMAND_ERROR_DETAIL_MAX_CHARS = 500
 DESKTOP_NOTIFICATION_TIMEOUT_MS = 3000
 DESKTOP_NOTIFICATION_BUS_NAME = "org.freedesktop.Notifications"
@@ -113,35 +90,12 @@ COMPOSE_SCAN_SKIP_DIRS = {
 }
 
 
-@dataclass(frozen=True)
-class AppUpdate:
-    available: bool
-    latest_version: str = ""
-    release_url: str = APP_RELEASES_URL
-    package_url: str = ""
-    package_digest: str = ""
-
-    @property
-    def can_install(self):
-        return (
-            bool(self.package_url)
-            and bool(self.package_digest)
-            and PLATFORM_INFO.is_debian_family
-        )
-
-
 compose_scan_state = ComposeScanState()
 cleanup_state = CleanupState()
-update_check_state = UpdateCheckState(
-    app_update=AppUpdate(False),
-    engine_update=docker_tray_platform.EngineUpdate(False),
-)
-updates_dialog_state = UpdatesDialogState()
 container_health_state = ContainerHealthState()
 stats_history_state = StatsHistoryState()
 tray_menu_update_state = TrayMenuUpdateState()
 container_watch_state = ContainerWatchState()
-remote_digest_cache = RemoteDigestCache()
 desktop_notification_state = DesktopNotificationState()
 
 cleanup_dialog = DialogController(
@@ -158,11 +112,6 @@ compose_scan_dialog = DialogController(
     ),
 )
 container_stats_dialog = DialogController("Container Stats", (780, 600))
-updates_dialog = DialogController(
-    "Docker Updates",
-    (400, 200),
-    on_clear=updates_dialog_state.clear_if_idle,
-)
 
 
 ICON_NAMES = ("icon-dark.png", "icon-light.png")
@@ -256,24 +205,6 @@ def get_containers():
     return parse_containers(result.stdout)
 
 
-def format_docker_error(message):
-    lower = message.lower()
-    if "permission denied" in lower and "docker.sock" in lower:
-        return "Docker socket permission denied. Reinstall Docker Tray's PolicyKit helper."
-    if "no such file or directory" in lower and "docker.sock" in lower:
-        return "Docker daemon is not running. Start docker.service."
-    if "cannot connect to the docker daemon" in lower:
-        return "Docker daemon is not running."
-    if any(marker in lower for marker in (
-        "request dismissed",
-        "authentication dialog was dismissed",
-    )):
-        return "Authorization was cancelled. Docker Tray will retry automatically."
-    if "not authorized" in lower:
-        return "Authorization was denied. Docker Tray will retry automatically."
-    return message
-
-
 def is_docker_installed():
     return REAL_DOCKER.is_file() and os.access(REAL_DOCKER, os.X_OK)
 
@@ -348,36 +279,6 @@ def container_sort_key(container):
 def extract_web_port(ports_str):
     match = HOST_PORT_RE.search(ports_str)
     return match.group(1) if match else None
-
-
-def get_command_failure_detail(result=None, error=None):
-    if isinstance(error, subprocess.TimeoutExpired):
-        detail = f"timed out after {error.timeout} seconds"
-    elif error is not None:
-        detail = f"{type(error).__name__}: {error}"
-    elif result is not None:
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
-    else:
-        detail = "unknown failure"
-    detail = format_docker_error(detail)
-    if len(detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
-        return detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
-    return detail
-
-
-def get_authorization_failure_detail(result, fallback="privileged operation failed"):
-    detail = result.stderr.strip() or result.stdout.strip() or fallback
-    lower = detail.lower()
-    if result.returncode == 126 or any(marker in lower for marker in (
-        "request dismissed",
-        "authentication dialog was dismissed",
-    )):
-        return "Authorization was cancelled. No changes were made."
-    if "not authorized" in lower:
-        return "Authorization was denied. No changes were made."
-    if result.returncode == 127:
-        return "Authorization failed. No changes were made."
-    return get_command_failure_detail(result=result)
 
 
 def notify_command_failure(icon, operation, result=None, error=None):
@@ -914,19 +815,6 @@ def ensure_compose_scan_window(icon):
 
 def set_compose_scan_content(content):
     compose_scan_dialog.set_content(content)
-
-
-def make_dialog_box():
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-    box.set_border_width(16)
-    return box
-
-
-def add_bottom_button_row(box, buttons):
-    spacer = Gtk.Box()
-    spacer.set_vexpand(True)
-    box.pack_start(spacer, True, True, 0)
-    box.pack_start(buttons, False, False, 0)
 
 
 def get_compose_scan_locations():
@@ -1789,7 +1677,7 @@ def start_menu_polling(icon):
     GLib.idle_add(track_tray_menu_pre_show, icon)
     watch_theme(icon)
     start_background(watch_container_status, icon)
-    start_background(poll_updates, icon)
+    start_background(update_service.poll_updates, icon)
     start_background(poll_container_stats, icon)
 
 
@@ -1824,1000 +1712,36 @@ def watch_container_status(icon):
         time.sleep(MENU_REFRESH_SECONDS)
 
 
-def check_engine_update():
-    return docker_tray_platform.check_engine_update(DOCKER_CMD_TIMEOUT_SECONDS, PLATFORM_INFO)
+def on_updates_changed(icon, notice_changed):
+    if notice_changed:
+        update_tray_menu(icon)
+    updates_dialog.refresh(icon)
 
 
-def get_local_image_metadata(images):
-    images = list(images)
-    if not images:
-        return {}
-    result = subprocess.run(
-        docker_tray_runtime.docker_command(
-            "image", "inspect", "--format", DOCKER_IMAGE_METADATA_FORMAT, *images,
-        ),
-        capture_output=True, text=True,
-        timeout=DOCKER_CMD_TIMEOUT_SECONDS,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "image inspection failed"
-        raise RuntimeError(detail)
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(lines) != len(images):
-        raise RuntimeError("Docker returned an incomplete image inspection result")
-    metadata = {}
-    for image, line in zip(images, lines):
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
-            raise RuntimeError("Docker returned invalid image metadata")
-        image_id, raw_repo_digests = parts
-        try:
-            repo_digests = json.loads(raw_repo_digests)
-        except (TypeError, ValueError, json.JSONDecodeError) as error:
-            raise RuntimeError("Docker returned invalid repository digests") from error
-        metadata[image] = LocalImageMetadata(
-            image_id=image_id,
-            registry_backed=isinstance(repo_digests, list) and bool(repo_digests),
-        )
-    return metadata
-
-
-def get_container_image_refs():
-    ids_result = run_docker_capture(
-        docker_tray_runtime.docker_command("ps", "-a", "-q"),
-        check=False,
-    )
-    if ids_result.returncode != 0:
-        raise RuntimeError(get_command_failure_detail(result=ids_result))
-    container_ids = sorted(output_line_set(ids_result.stdout))
-    if not container_ids:
-        return []
-
-    result = run_docker_capture(
-        docker_tray_runtime.docker_command(
-            "inspect", "--format", "{{.Config.Image}}\t{{.Image}}", *container_ids,
-        ),
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(get_command_failure_detail(result=result))
-    refs = []
-    for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
-            continue
-        image, container_image_id = parts
-        image = image.strip()
-        container_image_id = container_image_id.strip()
-        if image:
-            refs.append((image, container_image_id))
-    return refs
-
-
-def get_remote_config_digest(image):
-    result = subprocess.run(
-        docker_tray_runtime.docker_command("manifest", "inspect", "--verbose", image),
-        capture_output=True, text=True,
-        timeout=DOCKER_MANIFEST_TIMEOUT_SECONDS,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "registry request failed"
-        raise RuntimeError(f"{image}: {detail}")
-    try:
-        data = json.loads(result.stdout)
-    except Exception as error:
-        raise RuntimeError(f"{image}: invalid registry response") from error
-    arch = docker_tray_platform.linux_package_arch()
-    if isinstance(data, list):
-        for entry in data:
-            p = entry.get("Descriptor", {}).get("platform", {})
-            if p.get("architecture") == arch and p.get("os") == "linux":
-                return get_manifest_config_digest(entry)
-        return None
-    return get_manifest_config_digest(data)
-
-
-def get_cached_remote_config_digest(image, now=None):
-    now = time.monotonic() if now is None else now
-    with remote_digest_cache.lock:
-        cached = remote_digest_cache.values.get(image)
-        if cached is not None and cached[0] > now:
-            if cached[2] is not None:
-                raise RuntimeError(cached[2])
-            return cached[1]
-
-    try:
-        digest = get_remote_config_digest(image)
-    except Exception as error:
-        # Store text, not an exception retaining the worker's traceback.
-        with remote_digest_cache.lock:
-            remote_digest_cache.values[image] = (
-                now + REMOTE_DIGEST_FAILURE_CACHE_SECONDS, None, str(error),
-            )
-        raise
-    ttl = REMOTE_DIGEST_CACHE_SECONDS if digest else REMOTE_DIGEST_FAILURE_CACHE_SECONDS
-    with remote_digest_cache.lock:
-        remote_digest_cache.values[image] = (now + ttl, digest, None)
-    return digest
-
-
-def get_remote_digest_outcome(image):
-    try:
-        digest = get_cached_remote_config_digest(image)
-        if not digest:
-            raise RuntimeError("Registry returned no matching image digest")
-        return digest
-    except Exception as error:
-        return RuntimeError(str(error))
-
-
-def check_app_update():
-    request = Request(
-        APP_LATEST_RELEASE_API_URL,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": f"docker-tray/{APP_VERSION}",
-        },
-    )
-    with urlopen(request, timeout=APP_UPDATE_TIMEOUT_SECONDS) as response:
-        release = json.loads(response.read())
-
-    tag_name = release.get("tag_name", "")
-    latest_version = tag_name.removeprefix("v")
-    if parse_app_version(latest_version) <= parse_app_version(APP_VERSION):
-        return AppUpdate(False)
-
-    release_url = release.get("html_url", "")
-    if not release_url.startswith(f"{APP_RELEASES_URL}/"):
-        release_url = f"{APP_RELEASES_URL}/tag/{tag_name}"
-
-    package_url = ""
-    package_digest = ""
-    expected_package_name = f"docker-tray_{latest_version}_all.deb"
-    for asset in release.get("assets") or []:
-        if asset.get("name") != expected_package_name:
-            continue
-        candidate_url = asset.get("browser_download_url", "")
-        if not candidate_url.startswith(APP_RELEASE_DOWNLOAD_URL_PREFIX):
-            continue
-        candidate_digest = asset.get("digest") or ""
-        if candidate_digest and not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", candidate_digest):
-            continue
-        package_url = candidate_url
-        package_digest = candidate_digest.lower()
-        break
-    return AppUpdate(
-        True,
-        latest_version=latest_version,
-        release_url=release_url,
-        package_url=package_url,
-        package_digest=package_digest,
-    )
-
-
-def download_app_update(update, destination_dir):
-    if not update.package_url.startswith(APP_RELEASE_DOWNLOAD_URL_PREFIX):
-        raise RuntimeError("The release package URL is not trusted")
-
-    package_name = f"docker-tray_{update.latest_version}_all.deb"
-    package_path = Path(destination_dir) / package_name
-    request = Request(
-        update.package_url,
-        headers={"User-Agent": f"docker-tray/{APP_VERSION}"},
-    )
-    digest = hashlib.sha256()
-    with urlopen(request, timeout=APP_UPGRADE_TIMEOUT_SECONDS) as response:
-        with package_path.open("wb") as package_file:
-            while chunk := response.read(64 * 1024):
-                package_file.write(chunk)
-                digest.update(chunk)
-    package_path.chmod(0o644)
-
-    actual_digest = f"sha256:{digest.hexdigest()}"
-    if update.package_digest and actual_digest != update.package_digest:
-        package_path.unlink(missing_ok=True)
-        raise RuntimeError("The downloaded package checksum does not match the release")
-    validate_app_update_package(package_path, update.latest_version)
-    return package_path
-
-
-def validate_app_update_package(package_path, expected_version):
-    result = subprocess.run(
-        ["dpkg-deb", "--field", str(package_path), "Package", "Version", "Architecture"],
-        capture_output=True,
-        text=True,
-        timeout=APP_UPDATE_TIMEOUT_SECONDS,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "invalid Debian package"
-        raise RuntimeError(detail)
-    fields = {}
-    for line in result.stdout.splitlines():
-        if ":" in line:
-            key, value = line.split(":", 1)
-            fields[key.strip()] = value.strip()
-    if fields != {
-        "Package": "docker-tray",
-        "Version": expected_version,
-        "Architecture": "all",
-    }:
-        raise RuntimeError("The downloaded package metadata does not match the release")
-
-
-def run_app_upgrade(update):
-    if not update.can_install:
-        raise RuntimeError("Automatic Docker Tray upgrades are not available on this platform")
-    with tempfile.TemporaryDirectory(prefix="docker-tray-update-") as temp_dir:
-        Path(temp_dir).chmod(0o755)
-        package_path = download_app_update(update, temp_dir)
-        return subprocess.run(
-            docker_tray_runtime.privileged_command(
-                "install-update",
-                str(package_path),
-                update.latest_version,
-                update.package_digest,
-            ),
-            capture_output=True,
-            text=True,
-            timeout=APP_UPGRADE_TIMEOUT_SECONDS,
-        )
-
-
-def check_image_updates():
-    container_refs = get_container_image_refs()
-    images = sorted({
-        image for image, _container_image_id in container_refs
-        if is_checkable_image(image)
-    })
-    local_metadata = get_local_image_metadata(images)
-    registry_images = [
-        image for image in images
-        if (metadata := local_metadata.get(image)) and metadata.registry_backed
-    ]
-    stale_running_images = {
-        image for image, container_image_id in container_refs
-        if image in registry_images
-        and container_image_id
-        and (local := local_metadata[image].image_id)
-        and local != container_image_id
-    }
-    remote_ids = {}
-    if registry_images:
-        worker_count = min(REMOTE_DIGEST_WORKERS, len(registry_images))
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            remote_ids = dict(zip(
-                registry_images,
-                executor.map(get_remote_digest_outcome, registry_images),
-            ))
-    remote_updates = {
-        image for image in registry_images
-        if (local := local_metadata[image].image_id)
-        and (remote := remote_ids.get(image))
-        and not isinstance(remote, Exception)
-        and local != remote
-    }
-    updates = remote_updates | stale_running_images
-    failures = {
-        image: str(outcome) for image, outcome in remote_ids.items()
-        if isinstance(outcome, Exception)
-    }
-    if failures:
-        raise ImageUpdateCheckError(updates, failures)
-    return sorted(updates)
-
-
-def get_update_state_snapshot():
-    with update_check_state.lock:
-        return (
-            update_check_state.engine_update,
-            list(update_check_state.image_updates),
-        )
-
-
-def get_app_update_snapshot():
-    with update_check_state.lock:
-        return update_check_state.app_update
-
-
-def get_update_feedback_snapshot():
-    with update_check_state.lock:
-        return {
-            "checking": update_check_state.checking,
-            "last_checked": update_check_state.last_checked,
-            "errors": tuple(update_check_state.errors),
-        }
-
-
-def get_update_menu_notice(app_update, engine_update, image_updates, errors):
-    if app_update.available or engine_update.available or image_updates:
-        return "updates"
-    if errors:
-        return "error"
-    return None
-
-
-def set_update_feedback(icon, checking, last_checked=None, errors=None):
-    with update_check_state.lock:
-        previous_notice = get_update_menu_notice(
-            update_check_state.app_update,
-            update_check_state.engine_update,
-            update_check_state.image_updates,
-            update_check_state.errors,
-        )
-        changed = update_check_state.checking != checking
-        update_check_state.checking = checking
-        if last_checked is not None:
-            changed = changed or update_check_state.last_checked != last_checked
-            update_check_state.last_checked = last_checked
-        if errors is not None:
-            errors = tuple(errors)
-            changed = changed or update_check_state.errors != errors
-            update_check_state.errors = errors
-        notice_changed = previous_notice != get_update_menu_notice(
-            update_check_state.app_update,
-            update_check_state.engine_update,
-            update_check_state.image_updates,
-            update_check_state.errors,
-        )
-    if changed:
-        if notice_changed:
-            update_tray_menu(icon)
-        if updates_dialog.window is not None:
-            show_updates_dialog(icon)
-    return GLib.SOURCE_REMOVE
-
-
-def set_update_state(icon, engine_update, image_updates, app_update=None):
-    with update_check_state.lock:
-        previous_notice = get_update_menu_notice(
-            update_check_state.app_update,
-            update_check_state.engine_update,
-            update_check_state.image_updates,
-            update_check_state.errors,
-        )
-        if app_update is None:
-            app_update = update_check_state.app_update
-        app_update_became_available = (
-            app_update.available
-            and app_update != update_check_state.app_update
-        )
-        changed = (
-            app_update != update_check_state.app_update
-            or engine_update != update_check_state.engine_update
-            or image_updates != update_check_state.image_updates
-        )
-        update_check_state.app_update = app_update
-        update_check_state.engine_update = engine_update
-        update_check_state.image_updates = image_updates
-        notice_changed = previous_notice != get_update_menu_notice(
-            update_check_state.app_update,
-            update_check_state.engine_update,
-            update_check_state.image_updates,
-            update_check_state.errors,
-        )
-    if changed:
-        if notice_changed:
-            update_tray_menu(icon)
-        if updates_dialog.window is not None:
-            show_updates_dialog(icon)
-    if app_update_became_available:
-        notify_user(icon, f"Docker Tray {app_update.latest_version} is available.")
-    return GLib.SOURCE_REMOVE
-
-
-def run_update_check(icon):
-    if not update_check_state.run_lock.acquire(blocking=False):
-        return
-    GLib.idle_add(set_update_feedback, icon, True)
-    previous_engine_update, previous_image_updates = get_update_state_snapshot()
-    previous_app_update = get_app_update_snapshot()
-    errors = []
-    try:
-        try:
-            app_update = check_app_update()
-        except Exception as error:
-            app_update = previous_app_update
-            errors.append(f"Docker Tray release check: {get_command_failure_detail(error=error)}")
-        try:
-            engine_update = check_engine_update()
-        except Exception as error:
-            engine_update = previous_engine_update
-            errors.append(f"Docker Engine check: {get_command_failure_detail(error=error)}")
-        try:
-            image_updates = check_image_updates()
-        except ImageUpdateCheckError as error:
-            image_updates = sorted(set(error.updates) | {
-                image for image in previous_image_updates if image in error.failures
-            })
-            errors.extend(
-                f"Image registry check: {image}: {detail}"
-                for image, detail in error.failures.items()
-            )
-        except Exception as error:
-            image_updates = previous_image_updates
-            errors.append(f"Image registry check: {get_command_failure_detail(error=error)}")
-        GLib.idle_add(set_update_state, icon, engine_update, image_updates, app_update)
-        GLib.idle_add(set_update_feedback, icon, False, time.time(), errors)
-    finally:
-        update_check_state.run_lock.release()
-
-
-def start_update_check(icon):
-    start_background(run_update_check, icon)
-
-
-def get_update_check_label(_item=None):
-    feedback = get_update_feedback_snapshot()
-    if feedback["checking"]:
-        return "Checking for updates…"
-    if feedback["errors"]:
-        return f"Update check incomplete ({format_relative_time(feedback['last_checked'])})"
-    if feedback["last_checked"] is None:
-        return "Updates not checked yet"
-    return f"Updates checked {format_relative_time(feedback['last_checked'])}"
-
-
-def poll_updates(icon):
-    run_update_check(icon)
-    while getattr(icon, "_running", True):
-        time.sleep(UPDATE_CHECK_INTERVAL_SECONDS)
-        run_update_check(icon)
-
-
-def clear_updates_dialog():
-    return updates_dialog.clear()
-
-
-def destroy_updates_dialog():
-    return updates_dialog.destroy()
-
-
-def ensure_updates_dialog():
-    return updates_dialog.ensure()
-
-
-def set_updates_dialog_content(content):
-    updates_dialog.set_content(content)
-
-
-def start_app_upgrade(icon):
-    if (
-        updates_dialog_state.app_upgrading
-        or updates_dialog_state.engine_upgrading
-        or updates_dialog_state.pulling_images
-    ):
-        return
-    app_update = get_app_update_snapshot()
-    if not app_update.can_install:
-        return
-    updates_dialog_state.app_upgrading = True
-    updates_dialog_state.status = f"Downloading Docker Tray {app_update.latest_version}..."
-    show_updates_dialog(icon)
-
-    def _upgrade():
-        try:
-            result = run_app_upgrade(app_update)
-        except Exception as error:
-            GLib.idle_add(finish_app_upgrade, icon, None, error)
-            return
-        GLib.idle_add(finish_app_upgrade, icon, result, None)
-
-    start_background(_upgrade)
-
-
-def finish_app_upgrade(icon, result, error):
-    updates_dialog_state.app_upgrading = False
-    if error is not None:
-        if isinstance(error, subprocess.TimeoutExpired):
-            detail = "timed out"
-        else:
-            detail = f"{type(error).__name__}: {error}"
-        updates_dialog_state.status = f"Docker Tray upgrade failed: {detail}"
-        if updates_dialog.window is not None:
-            show_updates_dialog(icon)
-        return GLib.SOURCE_REMOVE
-
-    if result.returncode != 0:
-        detail = get_authorization_failure_detail(result, "upgrade command failed")
-        updates_dialog_state.status = f"Docker Tray upgrade failed: {detail}"
-        if updates_dialog.window is not None:
-            show_updates_dialog(icon)
-        return GLib.SOURCE_REMOVE
-
-    updates_dialog_state.status = "Docker Tray upgraded. Restarting..."
+def restart_after_upgrade(icon):
     icon._restart_after_upgrade = True
     icon.stop()
-    return GLib.SOURCE_REMOVE
-
-
-def start_docker_engine_upgrade(icon):
-    if (
-        updates_dialog_state.app_upgrading
-        or updates_dialog_state.engine_upgrading
-        or updates_dialog_state.pulling_images
-    ):
-        return
-    updates_dialog_state.engine_upgrading = True
-    updates_dialog_state.status = "Upgrading Docker Engine..."
-    show_updates_dialog(icon)
-
-    def _upgrade():
-        engine_update, _image_updates = get_update_state_snapshot()
-        try:
-            result = docker_tray_platform.run_engine_upgrade(
-                engine_update,
-                timeout=DOCKER_ENGINE_UPGRADE_TIMEOUT_SECONDS,
-            )
-        except Exception as error:
-            GLib.idle_add(finish_docker_engine_upgrade, icon, None, error)
-            return
-        GLib.idle_add(finish_docker_engine_upgrade, icon, result, None)
-
-    start_background(_upgrade)
-
-
-def finish_docker_engine_upgrade(icon, result, error):
-    updates_dialog_state.engine_upgrading = False
-    if error is not None:
-        if isinstance(error, subprocess.TimeoutExpired):
-            detail = "timed out"
-        else:
-            detail = f"{type(error).__name__}: {error}"
-        updates_dialog_state.status = f"Docker Engine upgrade failed: {detail}"
-        if updates_dialog.window is not None:
-            show_updates_dialog(icon)
-        return GLib.SOURCE_REMOVE
-
-    if result.returncode == 0:
-        updates_dialog_state.status = ""
-        _current_engine_update, image_updates = get_update_state_snapshot()
-        set_update_state(icon, docker_tray_platform.EngineUpdate(False), image_updates)
-        destroy_updates_dialog()
-        start_background(run_update_check, icon)
-    else:
-        detail = get_authorization_failure_detail(result, "upgrade command failed")
-        updates_dialog_state.status = f"Docker Engine upgrade failed: {detail}"
-        if updates_dialog.window is not None:
-            show_updates_dialog(icon)
-    return GLib.SOURCE_REMOVE
-
-
-def finish_image_pull(
-    icon,
-    image,
-    service_count,
-    removed_image_count=0,
-    cleanup_error="",
-    start_recheck=True,
-):
-    updates_dialog_state.pulling_images.discard(image)
-    engine_update, image_updates = get_update_state_snapshot()
-    image_updates = [update_image for update_image in image_updates if update_image != image]
-    set_update_state(icon, engine_update, image_updates)
-    status = f"Finished pulling and restarting {image} for {service_count} compose service(s)."
-    if removed_image_count:
-        noun = "image" if removed_image_count == 1 else "images"
-        status += f" Removed {removed_image_count} replaced {noun}."
-    if cleanup_error:
-        status += f" Replaced image cleanup failed: {cleanup_error}"
-    updates_dialog_state.status = status
-    if updates_dialog.window is not None:
-        show_updates_dialog(icon)
-    if start_recheck:
-        start_background(run_update_check, icon)
-    return GLib.SOURCE_REMOVE
-
-
-def set_image_pull_status(icon, status):
-    updates_dialog_state.status = status
-    if updates_dialog.window is not None:
-        show_updates_dialog(icon)
-    return GLib.SOURCE_REMOVE
-
-
-def fail_image_pull(icon, image, status):
-    updates_dialog_state.pulling_images.discard(image)
-    updates_dialog_state.status = status
-    if updates_dialog.window is not None:
-        show_updates_dialog(icon)
-    return GLib.SOURCE_REMOVE
-
-
-def schedule_image_pull_failure(icon, image, status, schedule_completion=True):
-    if schedule_completion:
-        GLib.idle_add(fail_image_pull, icon, image, status)
-    return False, status, 0, ""
-
-
-def run_privileged_image_updates(images):
-    images = list(images)
-    result = subprocess.run(
-        docker_tray_runtime.privileged_command("image-update", *images),
-        capture_output=True,
-        text=True,
-        timeout=DOCKER_IMAGE_UPDATE_TIMEOUT_SECONDS * max(1, len(images)),
-    )
-    outcomes = {}
-    for line in result.stdout.splitlines():
-        try:
-            message = json.loads(line)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        image = message.get("image") if isinstance(message, dict) else None
-        if image not in images or not isinstance(message.get("success"), bool):
-            continue
-        if message["success"]:
-            outcomes[image] = {
-                "success": True,
-                "error": "",
-                "service_count": int(message.get("service_count", 0)),
-                "removed_image_count": int(message.get("removed_image_count", 0)),
-                "cleanup_error": str(message.get("cleanup_error", "")),
-            }
-        else:
-            outcomes[image] = {
-                "success": False,
-                "error": str(message.get("error", "Image update failed")),
-                "service_count": 0,
-                "removed_image_count": 0,
-                "cleanup_error": "",
-            }
-
-    if result.returncode != 0 and not outcomes:
-        missing_detail = get_authorization_failure_detail(
-            result,
-            "The privileged image update helper did not return a result",
-        )
-    else:
-        missing_detail = (
-            result.stderr.strip()
-            or (result.stdout.strip() if not outcomes else "")
-            or "The privileged image update helper did not return a result"
-        )
-    if len(missing_detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
-        missing_detail = missing_detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
-    for image in images:
-        outcomes.setdefault(image, {
-            "success": False,
-            "error": missing_detail,
-            "service_count": 0,
-            "removed_image_count": 0,
-            "cleanup_error": "",
-        })
-    return outcomes
-
-
-def run_image_compose_pull_safely(
-    icon,
-    image,
-    start_recheck=True,
-    schedule_completion=True,
-):
-    try:
-        return run_image_compose_pull(
-            icon,
-            image,
-            start_recheck=start_recheck,
-            schedule_completion=schedule_completion,
-        )
-    except Exception as error:
-        status = f"Unexpected failure while updating {image}: {type(error).__name__}: {error}"
-        return schedule_image_pull_failure(
-            icon,
-            image,
-            status,
-            schedule_completion=schedule_completion,
-        )
-
-
-def start_image_compose_pull(button, icon, image):
-    if (
-        updates_dialog_state.app_upgrading
-        or updates_dialog_state.engine_upgrading
-        or updates_dialog_state.pulling_images
-    ):
-        return
-    updates_dialog_state.status = f"Pulling {image}..."
-    updates_dialog_state.pulling_images.add(image)
-    show_updates_dialog(icon)
-
-    def _pull():
-        run_image_compose_pull_safely(icon, image)
-
-    start_background(_pull)
-
-
-def finish_all_image_pulls(
-    icon,
-    images,
-    successful_images,
-    removed_image_count,
-    errors,
-    cleanup_errors,
-):
-    total_count = len(images)
-    success_count = len(successful_images)
-    updates_dialog_state.pulling_images.clear()
-    engine_update, image_updates = get_update_state_snapshot()
-    successful_images = set(successful_images)
-    remaining_updates = [image for image in image_updates if image not in successful_images]
-    set_update_state(icon, engine_update, remaining_updates)
-    if errors:
-        detail = "; ".join(errors)
-        if len(detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
-            detail = detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
-        updates_dialog_state.status = (
-            f"Batch finished: {success_count} of {total_count} images updated. "
-            f"Failures: {detail}"
-        )
-    else:
-        image_noun = "image" if total_count == 1 else "images"
-        updates_dialog_state.status = f"Updated and cleaned up all {total_count} {image_noun}."
-        if removed_image_count:
-            removed_noun = "image" if removed_image_count == 1 else "images"
-            updates_dialog_state.status += f" Removed {removed_image_count} replaced {removed_noun}."
-    if cleanup_errors:
-        cleanup_detail = "; ".join(cleanup_errors)
-        if len(cleanup_detail) > COMMAND_ERROR_DETAIL_MAX_CHARS:
-            cleanup_detail = cleanup_detail[:COMMAND_ERROR_DETAIL_MAX_CHARS].rstrip() + "…"
-        updates_dialog_state.status += f" Cleanup warnings: {cleanup_detail}"
-    if updates_dialog.window is not None:
-        show_updates_dialog(icon)
-    start_background(run_update_check, icon)
-    return GLib.SOURCE_REMOVE
-
-
-def start_all_image_compose_pulls(icon):
-    if (
-        updates_dialog_state.app_upgrading
-        or updates_dialog_state.engine_upgrading
-        or updates_dialog_state.pulling_images
-    ):
-        return
-    _engine_update, image_updates = get_update_state_snapshot()
-    if not image_updates:
-        return
-
-    images = list(image_updates)
-    updates_dialog_state.pulling_images.update(images)
-    updates_dialog_state.status = f"Updating 1 of {len(images)} images..."
-    show_updates_dialog(icon)
-
-    def _pull_all():
-        removed_image_count = 0
-        errors = []
-        cleanup_errors = []
-        successful_images = []
-        try:
-            outcomes = run_privileged_image_updates(images)
-        except Exception as error:
-            detail = get_command_failure_detail(error=error)
-            outcomes = {
-                image: {
-                    "success": False,
-                    "error": detail,
-                    "removed_image_count": 0,
-                    "cleanup_error": "",
-                }
-                for image in images
-            }
-        for index, image in enumerate(images, start=1):
-            GLib.idle_add(
-                set_image_pull_status,
-                icon,
-                f"Updating {index} of {len(images)}: {image}...",
-            )
-            outcome = outcomes[image]
-            if outcome["success"]:
-                successful_images.append(image)
-                removed_image_count += outcome["removed_image_count"]
-                if outcome["cleanup_error"]:
-                    cleanup_errors.append(f"{image}: {outcome['cleanup_error']}")
-            else:
-                errors.append(f"{image}: {outcome['error']}")
-
-        GLib.idle_add(
-            finish_all_image_pulls,
-            icon,
-            images,
-            successful_images,
-            removed_image_count,
-            errors,
-            cleanup_errors,
-        )
-
-    start_background(_pull_all)
-
-
-def run_image_compose_pull(
-    icon,
-    image,
-    start_recheck=True,
-    schedule_completion=True,
-):
-    outcome = run_privileged_image_updates([image])[image]
-    if not outcome["success"]:
-        return schedule_image_pull_failure(
-            icon,
-            image,
-            f"Update failed for {image}: {outcome['error']}",
-            schedule_completion=schedule_completion,
-        )
-
-    if schedule_completion:
-        GLib.idle_add(
-            finish_image_pull,
-            icon,
-            image,
-            outcome["service_count"],
-            outcome["removed_image_count"],
-            outcome["cleanup_error"],
-            start_recheck,
-        )
-    return (
-        True,
-        "",
-        outcome["removed_image_count"],
-        outcome["cleanup_error"],
-    )
-
-
-def show_updates_dialog(icon):
-    ensure_updates_dialog()
-    box = make_dialog_box()
-
-    app_update = get_app_update_snapshot()
-    engine_update, image_updates = get_update_state_snapshot()
-    update_action_running = (
-        updates_dialog_state.app_upgrading
-        or updates_dialog_state.engine_upgrading
-        or bool(updates_dialog_state.pulling_images)
-    )
-    feedback = get_update_feedback_snapshot()
-    check_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-    if feedback["checking"]:
-        check_spinner = Gtk.Spinner()
-        check_spinner.start()
-        check_row.pack_start(check_spinner, False, False, 0)
-    check_label = Gtk.Label(label=get_update_check_label())
-    check_label.set_xalign(0)
-    check_label.set_hexpand(True)
-    check_row.pack_start(check_label, True, True, 0)
-    check_button = Gtk.Button(label="Checking…" if feedback["checking"] else "Check now")
-    check_button.set_sensitive(not feedback["checking"])
-    if not feedback["checking"]:
-        check_button.connect("clicked", lambda button: start_update_check(icon))
-    check_row.pack_start(check_button, False, False, 0)
-    box.pack_start(check_row, False, False, 0)
-
-    for check_error in feedback["errors"]:
-        error_label = Gtk.Label(label=f"⚠ {check_error}")
-        error_label.set_xalign(0)
-        error_label.set_line_wrap(True)
-        box.pack_start(error_label, False, False, 0)
-    if app_update.available:
-        app_label = Gtk.Label(label="Docker Tray update available")
-        app_label.set_xalign(0)
-        box.pack_start(app_label, False, False, 0)
-
-        version_label = Gtk.Label(label=f"{APP_VERSION} → {app_update.latest_version}")
-        version_label.set_xalign(0)
-        box.pack_start(version_label, False, False, 0)
-
-        if app_update.can_install:
-            app_upgrading = updates_dialog_state.app_upgrading
-            install_button = Gtk.Button(
-                label="Installing..." if app_upgrading else "Install update",
-            )
-            install_button.set_sensitive(not update_action_running)
-            if not update_action_running:
-                install_button.connect("clicked", lambda button: start_app_upgrade(icon))
-            box.pack_start(install_button, False, False, 0)
-        else:
-            release_button = Gtk.Button(label="Open release")
-            release_button.connect(
-                "clicked",
-                lambda button, url=app_update.release_url: open_uri(url),
-            )
-            box.pack_start(release_button, False, False, 0)
-
-    if engine_update.available:
-        engine_label = Gtk.Label(label=f"{engine_update.package_name} update available")
-        engine_label.set_xalign(0)
-        box.pack_start(engine_label, False, False, 0)
-        if engine_update.detail:
-            detail = Gtk.Label(label=engine_update.detail)
-            detail.set_xalign(0)
-            box.pack_start(detail, False, False, 0)
-        if engine_update.can_upgrade:
-            engine_upgrading = updates_dialog_state.engine_upgrading
-            upgrade_button = Gtk.Button(
-                label="Upgrading..." if engine_upgrading else engine_update.upgrade_label,
-            )
-            upgrade_button.set_sensitive(not update_action_running)
-            if not update_action_running:
-                upgrade_button.connect("clicked", lambda b: start_docker_engine_upgrade(icon))
-            box.pack_start(upgrade_button, False, False, 0)
-        else:
-            detail = Gtk.Label(label="Use your system package manager to upgrade Docker.")
-            detail.set_xalign(0)
-            box.pack_start(detail, False, False, 0)
-
-    if image_updates:
-        images_label = Gtk.Label(label="Image updates available:")
-        images_label.set_xalign(0)
-        box.pack_start(images_label, False, False, 0)
-        pull_in_progress = bool(updates_dialog_state.pulling_images)
-        update_all_button = Gtk.Button(
-            label="Updating all..." if pull_in_progress else "Update + cleanup all",
-        )
-        update_all_button.set_sensitive(not update_action_running)
-        if not update_action_running:
-            update_all_button.connect("clicked", lambda button: start_all_image_compose_pulls(icon))
-        box.pack_start(update_all_button, False, False, 0)
-        for image in image_updates:
-            is_pulling = image in updates_dialog_state.pulling_images
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            image_label = Gtk.Label(label=image)
-            image_label.set_xalign(0)
-            image_label.set_hexpand(True)
-            image_label.set_line_wrap(True)
-            pull_button = Gtk.Button(label="Pulling" if is_pulling else "Update + cleanup")
-            pull_button.set_sensitive(not update_action_running)
-            if not update_action_running:
-                pull_button.connect(
-                    "clicked",
-                    lambda button, pull_image=image: start_image_compose_pull(button, icon, pull_image),
-                )
-            row.pack_start(image_label, True, True, 0)
-            row.pack_start(pull_button, False, False, 0)
-            box.pack_start(row, False, False, 0)
-
-    if updates_dialog_state.status:
-        status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        if updates_dialog_state.status.startswith(
-            (
-                "Downloading ",
-                "Installing ",
-                "Pulling ",
-                "Restarting ",
-                "Waiting ",
-                "Upgrading ",
-                "Removing ",
-            ),
-        ):
-            spinner = Gtk.Spinner()
-            spinner.start()
-            status_row.pack_start(spinner, False, False, 0)
-        status_label = Gtk.Label(label=updates_dialog_state.status)
-        status_label.set_xalign(0)
-        status_label.set_line_wrap(True)
-        status_row.pack_start(status_label, True, True, 0)
-        box.pack_start(status_row, False, False, 0)
-
-    if not app_update.available and not engine_update.available and not image_updates:
-        done_label = Gtk.Label(label="No updates pending.")
-        done_label.set_xalign(0)
-        box.pack_start(done_label, False, False, 0)
-
-    close_button = Gtk.Button(label="Close")
-    close_button.connect("clicked", lambda b: destroy_updates_dialog())
-    close_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-    close_row.set_halign(Gtk.Align.END)
-    close_row.pack_start(close_button, False, False, 0)
-    add_bottom_button_row(box, close_row)
-
-    set_updates_dialog_content(box)
-    return GLib.SOURCE_REMOVE
 
 
 def open_updates_dialog(icon, item):
-    GLib.idle_add(show_updates_dialog, icon)
+    GLib.idle_add(updates_dialog.show, icon)
+
+
+update_service = UpdateService(
+    UpdateBackend(APP_VERSION, PLATFORM_INFO),
+    dispatch=lambda callback, *args: GLib.idle_add(callback, *args),
+    start_background=start_background,
+    on_changed=on_updates_changed,
+    notify=notify_user,
+    restart=restart_after_upgrade,
+    close_dialog=lambda: updates_dialog.controller.destroy(),
+)
+updates_dialog = UpdatesDialog(update_service, open_uri)
 
 
 def get_settings_items(pystray):
     return [
-        pystray.MenuItem(get_update_check_label, open_updates_dialog),
+        pystray.MenuItem(update_service.get_update_check_label, open_updates_dialog),
         pystray.MenuItem("Test notification", send_test_notification),
         pystray.MenuItem("Container stats", open_container_stats_dialog),
         pystray.MenuItem("Compose search", make_compose_search_cb()),
@@ -2833,9 +1757,9 @@ def get_settings_items(pystray):
 
 def get_menu_items(pystray):
     items = []
-    app_update = get_app_update_snapshot()
-    engine_update, image_updates = get_update_state_snapshot()
-    update_feedback = get_update_feedback_snapshot()
+    app_update = update_service.get_app_update_snapshot()
+    engine_update, image_updates = update_service.get_update_state_snapshot()
+    update_feedback = update_service.get_update_feedback_snapshot()
     if container_health_state.level == "critical":
         items.append(pystray.MenuItem("🔴 Container issue detected", open_container_stats_dialog))
     elif container_health_state.level == "warning":
@@ -2907,6 +1831,7 @@ def main():
     try:
         icon.run(setup=start_menu_polling)
     finally:
+        update_service.close()
         instance_lock.close()
     if getattr(icon, "_restart_after_upgrade", False):
         os.execvp("docker-tray", ["docker-tray"])

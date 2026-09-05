@@ -36,7 +36,7 @@ class UpdateCheckState:
 
 
 @dataclass
-class UpdatesDialogState:
+class UpdateOperationState:
     status: str = ""
     app_upgrading: bool = False
     engine_upgrading: bool = False

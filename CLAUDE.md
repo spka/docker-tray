@@ -10,7 +10,12 @@ testing the tray menu against an already-running Flatpak Firefox instance.
 
 ## Files
 
-- `docker_tray.py` - main app.
+- `docker_tray.py` - tray startup, menu wiring, and non-update features.
+- `docker_tray_update_service.py` - GTK-independent update state, cache, and workers.
+- `docker_tray_update_backend.py` - update-related Docker commands, HTTP requests,
+  downloads, and privileged transactions; command and HTTP implementations are injectable.
+- `docker_tray_updates_dialog.py` - GTK rendering and update action callbacks.
+- `docker_tray_commands.py` - shared command and authorization error messages.
 - `docker_tray_runtime.py` - explicit Docker and PolicyKit command paths.
 - `docker_tray_state.py` - typed mutable process state.
 - `docker_tray_ui.py` - shared GTK dialog lifecycle.
@@ -340,10 +345,20 @@ invoking user's home, pulls and recreates each service, waits for running and
 healthy containers on the new image ID, and removes replaced image IDs only
 when no container still uses them.
 
+The main app wires one `UpdateService` to an `UpdateBackend` and an
+`UpdatesDialog`. Each service owns its check state, operation state, and digest
+cache. The service does not import GTK or the main app. `GLib.idle_add` is
+injected as its dispatcher, keeping dialog refreshes and notifications on the
+desktop side. Tests can instantiate independent services with a fake backend
+and queued dispatcher. The service's `close()` wakes its periodic checker on
+shutdown; already-authorized operations are not cancelled by closing a dialog.
+
 Remote manifest checks use at most four workers. Successful registry digests
-are cached for 15 minutes and failures for two minutes. `run_update_check()` has
-a non-blocking run lock so timer and post-update refreshes cannot start
-overlapping scans.
+are cached for 15 minutes and failures for two minutes. Individual registry
+failures retain previous notices for those images while successful checks still
+refresh other images. `UpdateService.run_update_check()` holds a non-blocking
+run lock until its results have been applied through the dispatcher, so timer
+and post-update refreshes cannot overlap or apply out-of-order snapshots.
 
 ## Troubleshooting
 

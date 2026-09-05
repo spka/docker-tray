@@ -15,7 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class RuntimeGatewayTests(unittest.TestCase):
     def test_application_routes_command_lists_through_gateway(self):
-        tree = ast.parse((ROOT / "docker_tray.py").read_text())
+        tree = ast.parse("\n".join(
+            (ROOT / name).read_text() for name in (
+                "docker_tray.py", "docker_tray_update_backend.py", "docker_tray_update_service.py",
+            )
+        ))
         raw_docker_commands = [
             node for node in ast.walk(tree)
             if isinstance(node, (ast.List, ast.Tuple))

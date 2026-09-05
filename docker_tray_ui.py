@@ -54,3 +54,16 @@ class DialogController:
         window.add(content)
         window.show_all()
         window.present()
+
+
+def make_dialog_box():
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    box.set_border_width(16)
+    return box
+
+
+def add_bottom_button_row(box, buttons):
+    spacer = Gtk.Box()
+    spacer.set_vexpand(True)
+    box.pack_start(spacer, True, True, 0)
+    box.pack_start(buttons, False, False, 0)
