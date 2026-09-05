@@ -1,7 +1,7 @@
 # Maintainer: Stephan Karsten <stephan.karsten@outlook.com>
 pkgname=docker-tray
-pkgver=0.2.7
-pkgrel=2
+pkgver=0.2.14
+pkgrel=1
 pkgdesc="Small Docker tray utility"
 arch=("any")
 url="https://github.com/spka/docker-tray"
@@ -19,17 +19,11 @@ depends=(
 source=(
   "${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz"
   "docker-tray.service"
-  "systemd-autostart.patch"
 )
 sha256sums=(
-  "d0a02834b9b14ba5ea1e0ec4d44238cb9dc265d9a788e0d444743592403b70d7"
+  "32c6ef91982933a1590a713a4986791c2cb4883f4a1e9a1b55434e8eac1f4fa3"
   "c115183a465aa4c0a5ad7a6da7a7a66642d8f4a2d266cd698c39216fd865900c"
-  "d9acd65ef8174f3b44b247ff48f402ddfeb68603e1e1c54d8cd703fea937f2d9"
 )
-
-prepare() {
-  patch -d "${srcdir}/${pkgname}-${pkgver}" -Np1 -i "${srcdir}/systemd-autostart.patch"
-}
 
 package() {
   local source_root="${srcdir}/${pkgname}-${pkgver}"
