@@ -41,6 +41,7 @@ from docker_tray_state import (
 from docker_tray_ui import DialogController
 from docker_tray_stats import format_bytes, format_ts, parse_cpu_pct, parse_mem_bytes
 from docker_tray_updates import (
+    ImageUpdateCheckError,
     LocalImageMetadata,
     format_relative_time,
     get_manifest_config_digest,
@@ -50,7 +51,7 @@ from docker_tray_updates import (
 )
 
 
-APP_VERSION = "0.2.13"
+APP_VERSION = "0.2.14"
 APP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/spka/docker-tray/releases/latest"
 APP_RELEASES_URL = "https://github.com/spka/docker-tray/releases"
 APP_RELEASE_DOWNLOAD_URL_PREFIX = f"{APP_RELEASES_URL}/download/"
@@ -1866,6 +1867,8 @@ def get_container_image_refs():
         docker_tray_runtime.docker_command("ps", "-a", "-q"),
         check=False,
     )
+    if ids_result.returncode != 0:
+        raise RuntimeError(get_command_failure_detail(result=ids_result))
     container_ids = sorted(output_line_set(ids_result.stdout))
     if not container_ids:
         return []
@@ -1876,6 +1879,8 @@ def get_container_image_refs():
         ),
         check=False,
     )
+    if result.returncode != 0:
+        raise RuntimeError(get_command_failure_detail(result=result))
     refs = []
     for line in result.stdout.strip().splitlines():
         parts = line.split("\t", 1)
@@ -1917,13 +1922,33 @@ def get_cached_remote_config_digest(image, now=None):
     with remote_digest_cache.lock:
         cached = remote_digest_cache.values.get(image)
         if cached is not None and cached[0] > now:
+            if cached[2] is not None:
+                raise RuntimeError(cached[2])
             return cached[1]
 
-    digest = get_remote_config_digest(image)
+    try:
+        digest = get_remote_config_digest(image)
+    except Exception as error:
+        # Store text, not an exception retaining the worker's traceback.
+        with remote_digest_cache.lock:
+            remote_digest_cache.values[image] = (
+                now + REMOTE_DIGEST_FAILURE_CACHE_SECONDS, None, str(error),
+            )
+        raise
     ttl = REMOTE_DIGEST_CACHE_SECONDS if digest else REMOTE_DIGEST_FAILURE_CACHE_SECONDS
     with remote_digest_cache.lock:
-        remote_digest_cache.values[image] = (now + ttl, digest)
+        remote_digest_cache.values[image] = (now + ttl, digest, None)
     return digest
+
+
+def get_remote_digest_outcome(image):
+    try:
+        digest = get_cached_remote_config_digest(image)
+        if not digest:
+            raise RuntimeError("Registry returned no matching image digest")
+        return digest
+    except Exception as error:
+        return RuntimeError(str(error))
 
 
 def check_app_update():
@@ -2062,15 +2087,23 @@ def check_image_updates():
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             remote_ids = dict(zip(
                 registry_images,
-                executor.map(get_cached_remote_config_digest, registry_images),
+                executor.map(get_remote_digest_outcome, registry_images),
             ))
     remote_updates = {
         image for image in registry_images
         if (local := local_metadata[image].image_id)
         and (remote := remote_ids.get(image))
+        and not isinstance(remote, Exception)
         and local != remote
     }
-    return sorted(remote_updates | stale_running_images)
+    updates = remote_updates | stale_running_images
+    failures = {
+        image: str(outcome) for image, outcome in remote_ids.items()
+        if isinstance(outcome, Exception)
+    }
+    if failures:
+        raise ImageUpdateCheckError(updates, failures)
+    return sorted(updates)
 
 
 def get_update_state_snapshot():
@@ -2192,6 +2225,14 @@ def run_update_check(icon):
             errors.append(f"Docker Engine check: {get_command_failure_detail(error=error)}")
         try:
             image_updates = check_image_updates()
+        except ImageUpdateCheckError as error:
+            image_updates = sorted(set(error.updates) | {
+                image for image in previous_image_updates if image in error.failures
+            })
+            errors.extend(
+                f"Image registry check: {image}: {detail}"
+                for image, detail in error.failures.items()
+            )
         except Exception as error:
             image_updates = previous_image_updates
             errors.append(f"Image registry check: {get_command_failure_detail(error=error)}")

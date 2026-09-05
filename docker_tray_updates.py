@@ -11,6 +11,15 @@ class LocalImageMetadata:
     registry_backed: bool
 
 
+class ImageUpdateCheckError(RuntimeError):
+    """An incomplete registry scan with usable results for other images."""
+
+    def __init__(self, updates, failures):
+        self.updates = sorted(updates)
+        self.failures = dict(failures)
+        super().__init__("; ".join(f"{image}: {error}" for image, error in failures.items()))
+
+
 def get_manifest_config_digest(manifest):
     for key in ("SchemaV2Manifest", "OCIManifest"):
         digest = manifest.get(key, {}).get("config", {}).get("digest")

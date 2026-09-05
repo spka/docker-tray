@@ -14,6 +14,28 @@ import docker_tray_privileged as helper
 
 
 class PrivilegedHelperTests(unittest.TestCase):
+    @mock.patch.object(helper, "run_docker")
+    def test_readiness_preserves_empty_health_field(self, run_docker):
+        image_id = "sha256:" + "b" * 64
+        for state, expected in (
+            (f"{image_id}\ttrue\t\n", True),
+            (f"{image_id}\ttrue\thealthy\n", True),
+            (f"{image_id}\ttrue\tstarting\n", False),
+            (f"{image_id}\ttrue\tunhealthy\n", False),
+            (f"{image_id}\tfalse\t\n", False),
+            ("sha256:old\ttrue\t\n", False),
+            (f"{image_id}\ttrue\n", False),
+        ):
+            with self.subTest(state=state):
+                run_docker.side_effect = [
+                    subprocess.CompletedProcess([], 0, "a" * 64 + "\n", ""),
+                    subprocess.CompletedProcess([], 0, image_id + "\n", ""),
+                    subprocess.CompletedProcess([], 0, state, ""),
+                ]
+                self.assertEqual(expected, helper.compose_service_ready(
+                    (Path("/tmp/compose.yml"),), Path("/tmp"), "web", "example:latest",
+                ))
+
     @mock.patch.object(helper.os, "getppid", side_effect=[1234, 1234])
     @mock.patch.object(helper.ctypes, "CDLL")
     def test_watch_helper_requests_termination_with_parent(self, cdll, _getppid):

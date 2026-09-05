@@ -179,6 +179,92 @@ class UpdateWorkerTests(unittest.TestCase):
         get_local_image_metadata.assert_called_once_with(images)
 
     @mock.patch.object(docker_tray, "get_remote_config_digest")
+    def test_registry_errors_are_cached_then_retried(self, remote):
+        remote.side_effect = [RuntimeError("registry offline"), "sha256:new"]
+        for now in (100, 101):
+            with self.assertRaisesRegex(RuntimeError, "registry offline"):
+                docker_tray.get_cached_remote_config_digest("example:latest", now=now)
+        self.assertEqual(1, remote.call_count)
+        self.assertEqual("sha256:new", docker_tray.get_cached_remote_config_digest(
+            "example:latest", now=100 + docker_tray.REMOTE_DIGEST_FAILURE_CACHE_SECONDS,
+        ))
+        self.assertEqual(2, remote.call_count)
+
+    @mock.patch.object(docker_tray, "run_docker_capture")
+    def test_image_discovery_reports_failed_commands(self, run):
+        failure = subprocess.CompletedProcess([], 1, "", "Docker unavailable")
+        for responses in (
+            [failure],
+            [subprocess.CompletedProcess([], 0, "a" * 64 + "\n", ""), failure],
+        ):
+            with self.subTest(command_count=len(responses)):
+                run.side_effect = responses
+                with self.assertRaisesRegex(RuntimeError, "Docker unavailable"):
+                    docker_tray.get_container_image_refs()
+
+    @mock.patch.object(docker_tray, "get_remote_config_digest")
+    @mock.patch.object(docker_tray, "get_local_image_metadata")
+    @mock.patch.object(docker_tray, "get_container_image_refs")
+    def test_registry_failure_keeps_other_results(self, refs, metadata, remote):
+        images = ["broken:latest", "current:latest", "working:latest", "stale:latest"]
+        refs.return_value = [(image, "sha256:old") for image in images]
+        metadata.return_value = {
+            image: docker_tray.LocalImageMetadata(
+                "sha256:new" if image == "stale:latest" else "sha256:old", True,
+            ) for image in images
+        }
+
+        def lookup(image):
+            if image in {"broken:latest", "stale:latest"}:
+                raise RuntimeError("offline")
+            return "sha256:new" if image == "working:latest" else "sha256:old"
+
+        remote.side_effect = lookup
+        with self.assertRaises(docker_tray.ImageUpdateCheckError) as raised:
+            docker_tray.check_image_updates()
+        self.assertEqual(["stale:latest", "working:latest"], raised.exception.updates)
+        self.assertEqual({"broken:latest", "stale:latest"}, set(raised.exception.failures))
+        self.assertEqual(4, remote.call_count)
+
+    @mock.patch.object(docker_tray, "get_cached_remote_config_digest", return_value=None)
+    def test_missing_platform_digest_is_reported(self, _remote):
+        outcome = docker_tray.get_remote_digest_outcome("example:latest")
+        self.assertIsInstance(outcome, RuntimeError)
+        self.assertIn("no matching image digest", str(outcome))
+
+    @mock.patch.object(docker_tray.GLib, "idle_add")
+    @mock.patch.object(docker_tray, "check_app_update")
+    @mock.patch.object(docker_tray, "check_engine_update")
+    @mock.patch.object(docker_tray, "check_image_updates")
+    def test_partial_scan_preserves_only_failed_image_notices(
+        self, check_images, _engine, _app, idle,
+    ):
+        docker_tray.update_check_state.image_updates = ["broken:latest", "current:latest"]
+        check_images.side_effect = docker_tray.ImageUpdateCheckError(
+            ["working:latest"], {"broken:latest": "offline"},
+        )
+        docker_tray.run_update_check(mock.Mock())
+        state_call = next(call for call in idle.call_args_list
+                          if call.args[0] is docker_tray.set_update_state)
+        self.assertEqual(["broken:latest", "working:latest"], state_call.args[3])
+        feedback_call = idle.call_args_list[-1]
+        self.assertIn("broken:latest: offline", feedback_call.args[4][0])
+
+    @mock.patch.object(docker_tray.GLib, "idle_add")
+    @mock.patch.object(docker_tray, "check_app_update")
+    @mock.patch.object(docker_tray, "check_engine_update")
+    @mock.patch.object(docker_tray, "run_docker_capture")
+    def test_failed_docker_query_preserves_previous_updates(
+        self, capture, _engine, _app, idle,
+    ):
+        capture.return_value = subprocess.CompletedProcess([], 1, "", "Docker unavailable")
+        docker_tray.run_update_check(mock.Mock())
+        state_call = next(call for call in idle.call_args_list
+                          if call.args[0] is docker_tray.set_update_state)
+        self.assertEqual(["example:latest"], state_call.args[3])
+        self.assertIn("Docker unavailable", idle.call_args_list[-1].args[4][0])
+
+    @mock.patch.object(docker_tray, "get_remote_config_digest")
     @mock.patch.object(docker_tray, "get_local_image_metadata")
     @mock.patch.object(docker_tray, "get_container_image_refs")
     def test_image_update_check_includes_moving_major_tags(

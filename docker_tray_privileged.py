@@ -292,7 +292,8 @@ def compose_service_ready(files, working_dir, service, image):
     ])
     if state_result.returncode != 0:
         return False
-    states = output_lines(state_result.stdout)
+    # An empty health field is valid; stripping whitespace would remove its tab.
+    states = [line for line in state_result.stdout.splitlines() if line.strip()]
     if len(states) != len(container_ids):
         return False
     for line in states:
