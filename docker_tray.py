@@ -41,7 +41,7 @@ from docker_tray_commands import (
 from docker_tray_ui import make_dialog_box, add_bottom_button_row
 
 
-APP_VERSION = "0.2.14"
+APP_VERSION = "0.2.15"
 REAL_DOCKER = docker_tray_runtime.REAL_DOCKER
 DOCKER_PS_FORMAT = "{{.Names}}\t{{.Status}}\t{{.Ports}}"
 DOCKER_COMPOSE_LABEL_FORMAT = (
