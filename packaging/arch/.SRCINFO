@@ -1,6 +1,6 @@
 pkgbase = docker-tray
 	pkgdesc = Small Docker tray utility
-	pkgver = 0.2.14
+	pkgver = 0.2.15
 	pkgrel = 1
 	url = https://github.com/spka/docker-tray
 	arch = any
@@ -13,9 +13,9 @@ pkgbase = docker-tray
 	depends = python-pillow
 	depends = python-pystray
 	depends = polkit
-	source = docker-tray-0.2.14.tar.gz::https://github.com/spka/docker-tray/archive/refs/tags/v0.2.14.tar.gz
+	source = docker-tray-0.2.15.tar.gz::https://github.com/spka/docker-tray/archive/refs/tags/v0.2.15.tar.gz
 	source = docker-tray.service
-	sha256sums = 32c6ef91982933a1590a713a4986791c2cb4883f4a1e9a1b55434e8eac1f4fa3
+	sha256sums = afb90b56797d0611bf1751eb1049dc0f6ec21e4768f3f07ca66a769251d58049
 	sha256sums = c115183a465aa4c0a5ad7a6da7a7a66642d8f4a2d266cd698c39216fd865900c
 
 pkgname = docker-tray

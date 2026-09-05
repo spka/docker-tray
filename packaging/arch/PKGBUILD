@@ -1,6 +1,6 @@
 # Maintainer: Stephan Karsten <stephan.karsten@outlook.com>
 pkgname=docker-tray
-pkgver=0.2.14
+pkgver=0.2.15
 pkgrel=1
 pkgdesc="Small Docker tray utility"
 arch=("any")
@@ -21,7 +21,7 @@ source=(
   "docker-tray.service"
 )
 sha256sums=(
-  "32c6ef91982933a1590a713a4986791c2cb4883f4a1e9a1b55434e8eac1f4fa3"
+  "afb90b56797d0611bf1751eb1049dc0f6ec21e4768f3f07ca66a769251d58049"
   "c115183a465aa4c0a5ad7a6da7a7a66642d8f4a2d266cd698c39216fd865900c"
 )
 

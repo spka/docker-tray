@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class PackagingTests(unittest.TestCase):
     def test_versions_match(self):
         self.assertEqual("0.2.15", docker_tray.APP_VERSION)
-        self.assertIn("pkgver=0.2.14", (ROOT / "packaging/arch/PKGBUILD").read_text())
+        self.assertIn("pkgver=0.2.15", (ROOT / "packaging/arch/PKGBUILD").read_text())
         self.assertIn('version="${1:-0.2.15}"', (ROOT / "package-deb.sh").read_text())
 
     def test_arch_package_contains_security_integration(self):
@@ -29,8 +29,8 @@ class PackagingTests(unittest.TestCase):
 
     def test_arch_metadata_tracks_published_release(self):
         srcinfo = (ROOT / "packaging/arch/.SRCINFO").read_text()
-        self.assertIn("pkgver = 0.2.14", srcinfo)
-        self.assertIn("docker-tray-0.2.14.tar.gz", srcinfo)
+        self.assertIn("pkgver = 0.2.15", srcinfo)
+        self.assertIn("docker-tray-0.2.15.tar.gz", srcinfo)
         self.assertNotIn("SKIP", srcinfo)
 
     def test_packages_install_supervised_user_service(self):
